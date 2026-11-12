@@ -1,0 +1,85 @@
+name: build-ios-llama-binaries
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-ios:
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Xcode
+        uses: ggml-org/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Install CMake
+        run: brew install cmake ninja
+
+      - name: Clone llama.cpp v0.9.0
+        run: |
+          git clone --depth 1 --branch v0.9.0 https://github.com/ggml-org/llama.cpp.git
+          cd llama.cpp
+          git submodule update --init --recursive
+
+      - name: Configure (iOS arm64, Metal embedded)
+        run: |
+          cd llama.cpp
+          cmake -B build -G Xcode \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=16.4 \
+            -DGGML_METAL=ON \
+            -DGGML_METAL_EMBED_LIBRARY=ON \
+            -DGGML_METAL_USE_BF16=ON \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DLLAMA_OPENSSL=OFF \
+            -DLLAMA_SUBPROCESS=ON \
+            -DLLAMA_BUILD_TOOLS=ON \
+            -DLLAMA_BUILD_SERVER=ON \
+            -DLLAMA_BUILD_UI=ON \
+            -DLLAMA_USE_PREBUILT_UI=ON \
+            -DLLAMA_BUILD_APP=OFF \
+            -DLLAMA_BUILD_EXAMPLES=OFF \
+            -DLLAMA_BUILD_TESTS=OFF \
+            -DCMAKE_XCODE_ATTRIBUTE_DEVELOPMENT_TEAM= \
+            -DCMAKE_INSTALL_PREFIX=$PWD/install
+
+      - name: Build
+        run: |
+          cd llama.cpp
+          cmake --build build --config Release -j $(sysctl -n hw.logicalcpu) \
+            -- CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY=""
+
+      - name: Collect binaries
+        run: |
+          mkdir -p artifacts
+          find llama.cpp/build -type f -perm +0111 -name "llama-cli" -exec cp {} artifacts/ \;
+          find llama.cpp/build -type f -perm +0111 -name "llama-server" -exec cp {} artifacts/ \;
+          ls -lh artifacts
+
+      - name: Strip & check
+        run: |
+          cd artifacts
+          for b in llama-cli llama-server; do
+            if [ -f "$b" ]; then
+              strip "$b" || true
+              file "$b"
+              xcrun vtool -show-build-settings "$b" || true
+            fi
+          done
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: llama-ios-binaries
+          path: artifacts/*
+          retention-days: 30
