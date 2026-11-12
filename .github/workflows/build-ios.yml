@@ -1,85 +1,103 @@
-name: build-ios-llama-binaries
+name: Build llama.cpp v0.9.0 (iOS arm64 / Metal)
 
 on:
   workflow_dispatch:
-  push:
-    tags:
-      - "v*"
 
-permissions:
-  contents: write
+env:
+  LLAMA_TAG: v0.9.0
+  DEPLOYMENT_TARGET: "16.4"
+  BUILD_TYPE: Release
 
 jobs:
   build-ios:
     runs-on: macos-15
+
     steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Setup Xcode
-        uses: ggml-org/setup-xcode@v1
-        with:
-          xcode-version: latest-stable
-
-      - name: Install CMake
-        run: brew install cmake ninja
-
-      - name: Clone llama.cpp v0.9.0
+      - name: Check Xcode / SDK
         run: |
-          git clone --depth 1 --branch v0.9.0 https://github.com/ggml-org/llama.cpp.git
+          xcode-select -p
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-path
+          xcrun --sdk iphoneos --show-sdk-version
+          cmake --version
+          ninja --version
+
+      - name: Checkout llama.cpp ${{ env.LLAMA_TAG }}
+        run: |
+          git clone --recursive https://github.com/ggml-org/llama.cpp.git
           cd llama.cpp
+          git checkout ${{ env.LLAMA_TAG }}
           git submodule update --init --recursive
 
-      - name: Configure (iOS arm64, Metal embedded)
+      - name: Build Web UI (best-effort)
+        working-directory: llama.cpp/tools/server
+        continue-on-error: true
         run: |
-          cd llama.cpp
-          cmake -B build -G Xcode \
+          if [ -f package.json ]; then
+            npm ci || npm install
+            npm run build
+          else
+            echo "No package.json, skip UI build"
+          fi
+
+      - name: CMake configure
+        working-directory: llama.cpp
+        run: |
+          cmake -B build-ios -G Ninja \
             -DCMAKE_SYSTEM_NAME=iOS \
             -DCMAKE_OSX_ARCHITECTURES=arm64 \
-            -DCMAKE_OSX_DEPLOYMENT_TARGET=16.4 \
+            -DCMAKE_OSX_SYSROOT=iphoneos \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=${{ env.DEPLOYMENT_TARGET }} \
+            -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
+            \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DLLAMA_STATIC=ON \
+            \
             -DGGML_METAL=ON \
             -DGGML_METAL_EMBED_LIBRARY=ON \
-            -DGGML_METAL_USE_BF16=ON \
-            -DBUILD_SHARED_LIBS=OFF \
-            -DLLAMA_OPENSSL=OFF \
-            -DLLAMA_SUBPROCESS=ON \
+            -DGGML_BLAS=OFF \
+            -DGGML_NATIVE=OFF \
+            -DGGML_OPENMP=OFF \
+            \
             -DLLAMA_BUILD_TOOLS=ON \
             -DLLAMA_BUILD_SERVER=ON \
-            -DLLAMA_BUILD_UI=ON \
-            -DLLAMA_USE_PREBUILT_UI=ON \
-            -DLLAMA_BUILD_APP=OFF \
             -DLLAMA_BUILD_EXAMPLES=OFF \
             -DLLAMA_BUILD_TESTS=OFF \
-            -DCMAKE_XCODE_ATTRIBUTE_DEVELOPMENT_TEAM= \
-            -DCMAKE_INSTALL_PREFIX=$PWD/install
+            -DLLAMA_BUILD_APP=OFF \
+            -DLLAMA_BUILD_COMMON=ON \
+            \
+            -DLLAMA_BUILD_UI=ON \
+            -DLLAMA_BUILD_WEBUI=ON \
+            -DLLAMA_USE_PREBUILT_UI=OFF \
+            \
+            -DLLAMA_OPENSSL=OFF \
+            -DLLAMA_CURL=OFF
+
+      - name: Verify CMake options
+        working-directory: llama.cpp
+        run: |
+          cmake -LA build-ios | grep -Ei 'METAL|UI|SERVER|TOOLS|OPENSSL|CURL' | sort || true
 
       - name: Build
+        working-directory: llama.cpp
         run: |
-          cd llama.cpp
-          cmake --build build --config Release -j $(sysctl -n hw.logicalcpu) \
-            -- CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY=""
+          cmake --build build-ios --config ${{ env.BUILD_TYPE }} -j$(sysctl -n hw.ncpu)
 
       - name: Collect binaries
+        working-directory: llama.cpp
         run: |
           mkdir -p artifacts
-          find llama.cpp/build -type f -perm +0111 -name "llama-cli" -exec cp {} artifacts/ \;
-          find llama.cpp/build -type f -perm +0111 -name "llama-server" -exec cp {} artifacts/ \;
-          ls -lh artifacts
+          find build-ios -type f -name 'llama-cli' -exec cp {} artifacts/ \;
+          find build-ios -type f -name 'llama-server' -exec cp {} artifacts/ \;
 
-      - name: Strip & check
-        run: |
-          cd artifacts
-          for b in llama-cli llama-server; do
-            if [ -f "$b" ]; then
-              strip "$b" || true
-              file "$b"
-              xcrun vtool -show-build-settings "$b" || true
-            fi
-          done
+          ls -lh artifacts/
+          file artifacts/llama-cli
+          file artifacts/llama-server
+          otool -l artifacts/llama-server | grep -A2 LC_BUILD_VERSION || true
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v4
         with:
-          name: llama-ios-binaries
-          path: artifacts/*
+          name: llama-ios-arm64-v0.9.0
+          path: llama.cpp/artifacts/*
           retention-days: 30
