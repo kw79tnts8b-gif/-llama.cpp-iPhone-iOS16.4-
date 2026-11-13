@@ -1,4 +1,4 @@
-name: Build default.metallib for llama.cpp v0.9.0
+name: Build default.metallib (iOS18.5 SDK, deploy 16.4)
 
 on:
   workflow_dispatch:
@@ -7,34 +7,35 @@ jobs:
   build-metallib:
     runs-on: macos-15
 
+    env:
+      LLAMA_TAG: v0.9.0
+
     steps:
       - name: Checkout llama.cpp v0.9.0
         run: |
-          git clone --depth 1 --branch v0.9.0 https://github.com/ggml-org/llama.cpp.git
+          git clone --depth 1 --branch ${{ env.LLAMA_TAG }} https://github.com/ggml-org/llama.cpp.git
           cd llama.cpp
-          # 同步 ggml 子模块到 v0.9.0 锁定的 commit
           git submodule update --init --recursive
 
-      - name: Download iPhoneOS27.0.sdk
+      - name: Download iPhoneOS18.5.sdk
         run: |
-          curl -L -o iPhoneOS27.0.sdk.zip \
-            https://github.com/xybp888/iOS-SDKs/releases/download/iOS27.0-SDKs/iPhoneOS27.0.sdk.zip
+          curl -L -o iPhoneOS18.5.sdk.zip \
+            https://github.com/xybp888/iOS-SDKs/releases/download/iOS18.5-SDKs/iPhoneOS18.5.sdk.zip
           mkdir -p $HOME/sdks
-          unzip -q iPhoneOS27.0.sdk.zip -d $HOME/sdks
-          # 自动定位解压后的 sdk 目录
+          unzip -q iPhoneOS18.5.sdk.zip -d $HOME/sdks
           SDK=$(find $HOME/sdks -name "iPhoneOS*.sdk" -type d | head -n 1)
           echo "SDK=$SDK" >> $GITHUB_ENV
           echo "Found SDK: $SDK"
-          ls $SDK/System/Library/Frameworks/Metal.framework
+          ls "$SDK/System/Library/Frameworks/Metal.framework"
 
-      - name: Build with CMake (Metal enabled)
+      - name: Configure CMake (Metal, no embed)
         run: |
           cd llama.cpp
           cmake -B build-ios \
             -DCMAKE_SYSTEM_NAME=iOS \
-            -DCMAKE_OSX_SYSROOT="${{ env.SDK }}" \
+            -DCMAKE_OSX_SYSROOT="$SDK" \
             -DCMAKE_OSX_ARCHITECTURES=arm64 \
-            -DCMAKE_OSX_DEPLOYMENT_TARGET=16.5 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=16.4 \
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_SHARED_LIBS=OFF \
             -DGGML_METAL=ON \
@@ -42,20 +43,23 @@ jobs:
             -DLLAMA_BUILD_TESTS=OFF \
             -DLLAMA_BUILD_TOOLS=ON \
             -DLLAMA_BUILD_EXAMPLES=ON
-          cmake --build build-ios -j$(sysctl -n hw.ncpu)
+        env:
+          SDK: ${{ env.SDK }}
 
-      - name: Locate default.metallib
+      - name: Build
         run: |
           cd llama.cpp
-          find build-ios -name "default.metallib" -type f
-          cp build-ios/bin/default.metallib ./default.metallib 2>/dev/null || \
-          cp build-ios/ggml/src/ggml-metal/default.metallib ./default.metallib 2>/dev/null || true
-          ls -lh default.metallib
+          cmake --build build-ios -j$(sysctl -n hw.ncpu)
 
-      - name: Upload default.metallib
+      - name: Locate and upload default.metallib
+        run: |
+          cd llama.cpp
+          echo "Searching for default.metallib:"
+          find build-ios -name 'default.metallib'
+        continue-on-error: false
+
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: default.metallib
-          path: llama.cpp/default.metallib
-          retention-days: 90
-
+          path: llama.cpp/build-ios/bin/default.metallib
