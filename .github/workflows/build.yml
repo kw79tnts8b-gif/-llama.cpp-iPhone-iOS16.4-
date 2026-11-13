@@ -26,9 +26,8 @@ jobs:
           SDK=$(find $HOME/sdks -name "iPhoneOS*.sdk" -type d | head -n 1)
           echo "SDK=$SDK" >> $GITHUB_ENV
           echo "Found SDK: $SDK"
-          ls "$SDK/System/Library/Frameworks/Metal.framework"
 
-      - name: Configure CMake (Metal only, no examples/tools)
+      - name: Configure CMake
         run: |
           cd llama.cpp
           cmake -B build-ios \
@@ -42,17 +41,17 @@ jobs:
             -DGGML_METAL_EMBED_LIBRARY=OFF \
             -DLLAMA_BUILD_TESTS=OFF \
             -DLLAMA_BUILD_TOOLS=OFF \
-            -DLLAMA_BUILD_EXAMPLES=OFF
+            -DLLAMA_BUILD_EXAMPLES=OFF \
+            -DLLAMA_BUILD_APP=OFF
 
-      - name: Build
+      - name: Build metallib only
         run: |
           cd llama.cpp
-          cmake --build build-ios -j$(sysctl -n hw.ncpu)
+          cmake --build build-ios --target ggml-metal-lib -j$(sysctl -n hw.ncpu)
 
       - name: Find and upload default.metallib
         run: |
           cd llama.cpp
-          echo "Searching for default.metallib:"
           find build-ios -name 'default.metallib'
 
       - name: Upload artifact
