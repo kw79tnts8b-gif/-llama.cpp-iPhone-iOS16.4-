@@ -28,7 +28,7 @@ jobs:
           echo "Found SDK: $SDK"
           ls "$SDK/System/Library/Frameworks/Metal.framework"
 
-      - name: Configure CMake (Metal, no embed)
+      - name: Configure CMake (Metal only, no examples/tools)
         run: |
           cd llama.cpp
           cmake -B build-ios \
@@ -41,25 +41,22 @@ jobs:
             -DGGML_METAL=ON \
             -DGGML_METAL_EMBED_LIBRARY=OFF \
             -DLLAMA_BUILD_TESTS=OFF \
-            -DLLAMA_BUILD_TOOLS=ON \
-            -DLLAMA_BUILD_EXAMPLES=ON
-        env:
-          SDK: ${{ env.SDK }}
+            -DLLAMA_BUILD_TOOLS=OFF \
+            -DLLAMA_BUILD_EXAMPLES=OFF
 
       - name: Build
         run: |
           cd llama.cpp
           cmake --build build-ios -j$(sysctl -n hw.ncpu)
 
-      - name: Locate and upload default.metallib
+      - name: Find and upload default.metallib
         run: |
           cd llama.cpp
           echo "Searching for default.metallib:"
           find build-ios -name 'default.metallib'
-        continue-on-error: false
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: default.metallib
-          path: llama.cpp/build-ios/bin/default.metallib
+          path: llama.cpp/build-ios/**/default.metallib
