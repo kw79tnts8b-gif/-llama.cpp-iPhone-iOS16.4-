@@ -1,40 +1,21 @@
-name: build-ios-metallib
-
-on:
-  workflow_dispatch:
-
-jobs:
-  build:
-    runs-on: macos-latest
-
-    steps:
-      - name: Checkout llama.cpp v0.9.0
-        run: |
-          git clone --depth 1 --branch v0.9.0 https://github.com/ggml-org/llama.cpp.git
-
-      - name: Find and compile Metal shader
+      - name: Compile Metal shaders -> default.metallib (iOS 16)
         run: |
           cd llama.cpp
+          cd ggml/src/ggml-metal
 
-          # 先看看 .metal 文件到底在哪
-          find . -name "*.metal" -type f
+          # 收集所有 metal 源（主文件 + kernels）
+          METAL_FILES=$(find . -name '*.metal' -type f)
 
-          # 编 metallib
+          echo "Metal sources:"
+          echo "$METAL_FILES"
+
           xcrun metal -Os \
             -target air64-apple-ios16.0 \
             -fno-fast-math \
-            ggml/src/ggml-metal.metal \
+            $METAL_FILES \
             -o ggml-metal.air
 
           xcrun metallib ggml-metal.air -o default.metallib
 
           rm -f ggml-metal.air
-
           ls -lh default.metallib
-
-      - name: Upload default.metallib
-        uses: actions/upload-artifact@v4
-        with:
-          name: default.metallib
-          path: llama.cpp/default.metallib
-          retention-days: 7
