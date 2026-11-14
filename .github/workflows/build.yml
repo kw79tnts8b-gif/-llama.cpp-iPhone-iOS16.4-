@@ -1,4 +1,4 @@
-name: build-llama-ios-metal
+name: build-llama-ios
 
 on:
   workflow_dispatch:
@@ -6,95 +6,100 @@ on:
 jobs:
   build:
     runs-on: macos-15
+    timeout-minutes: 120
+
+    env:
+      LLAMA_ZIP_URL: https://github.com/ggml-org/llama.cpp/archive/refs/tags/v1.0.0.zip
+      SDK_ZIP_URL: https://github.com/xybp888/iOS-SDKs/releases/download/iOS17.5-SDKs/iPhoneOS17.5.sdk.zip
+      MIN_IOS: "16.4"
+
     steps:
-      - name: Checkout llama.cpp v1.0.0
-        run: |
-          curl -L https://github.com/ggml-org/llama.cpp/archive/refs/tags/v1.0.0.tar.gz | tar xz
-          mv llama.cpp-1.0.0 llama.cpp
+      - name: Install cmake and ninja
+        run: brew install cmake ninja
 
-      - name: Setup iOS SDK
+      - name: Fetch iPhoneOS 17.5 SDK
         run: |
-          curl -L -o iPhoneOS17.5.sdk.zip "YOUR_SDK_URL_HERE"
-          sudo mkdir -p /Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs
-          sudo unzip -q iPhoneOS17.5.sdk.zip -d /Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/
-          ls /Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/
+          set -eu
+          mkdir -p "$GITHUB_WORKSPACE/sdk"
+          curl -fL --retry 3 --retry-delay 2 -o sdk.zip "$SDK_ZIP_URL"
+          ditto -x -k sdk.zip "$GITHUB_WORKSPACE/sdk"
+          rm -rf "$GITHUB_WORKSPACE/sdk/__MACOSX"
+          SDK=$(find "$GITHUB_WORKSPACE/sdk" -type d -name '*.sdk' -not -path '*/__MACOSX/*' | head -n1)
+          test -n "$SDK"
+          test -d "$SDK/usr/lib"
+          test -f "$SDK/usr/lib/libSystem.tbd"
+          echo "SDK_DIR=$SDK" >> "$GITHUB_ENV"
+          echo "SDK -> $SDK"
 
-      - name: Install dependencies
+      - name: Fetch llama.cpp v1.0.0
         run: |
-          brew update
-          brew install cmake ninja ldid
+          set -eu
+          curl -fL --retry 3 --retry-delay 2 -o llama.zip "$LLAMA_ZIP_URL"
+          unzip -q llama.zip -d "$GITHUB_WORKSPACE/src"
+          SRC=$(find "$GITHUB_WORKSPACE/src" -maxdepth 1 -mindepth 1 -type d | head -n1)
+          mv "$SRC" "$GITHUB_WORKSPACE/llama.cpp"
+          test -f "$GITHUB_WORKSPACE/llama.cpp/CMakeLists.txt"
+          echo "source -> $GITHUB_WORKSPACE/llama.cpp"
 
-      - name: Configure (Metal ON, Static, No Bundle)
+      - name: Configure (CMake + Ninja, iOS arm64)
         run: |
-          mkdir build && cd build
-          cmake ../llama.cpp \
-            -G Ninja \
+          set -eu
+          cmake -S "$GITHUB_WORKSPACE/llama.cpp" -B "$GITHUB_WORKSPACE/build-ios" -G Ninja \
             -DCMAKE_SYSTEM_NAME=iOS \
-            -DCMAKE_SYSTEM_PROCESSOR=arm64 \
-            -DCMAKE_OSX_SYSROOT=/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS17.5.sdk \
+            -DCMAKE_SYSTEM_VERSION="$MIN_IOS" \
+            -DCMAKE_OSX_SYSROOT="$SDK_DIR" \
             -DCMAKE_OSX_ARCHITECTURES=arm64 \
-            -DCMAKE_OSX_DEPLOYMENT_TARGET=16.4 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET="$MIN_IOS" \
+            -DCMAKE_C_COMPILER="$(xcrun --find clang)" \
+            -DCMAKE_CXX_COMPILER="$(xcrun --find clang++)" \
+            -DCMAKE_AR="$(xcrun --find ar)" \
+            -DCMAKE_RANLIB="$(xcrun --find ranlib)" \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_MACOSX_BUNDLE=OFF \
-            -DBUILD_SHARED_LIBS=OFF \
-            -DGGML_SHARED=OFF \
-            -DGGML_STATIC=ON \
-            -DLLAMA_BUILD_SHARED_LIBS=OFF \
-            -DLLAMA_SHARED=OFF \
-            -DLLAMA_STATIC=ON \
-            -DGGML_METAL=ON \
-            -DGGML_BLAS=ON \
-            -DGGML_ACCELERATE=ON \
-            -DBUILD_TESTING=OFF \
+            -DGGML_METAL=OFF \
+            -DLLAMA_METAL=OFF \
             -DLLAMA_BUILD_SERVER=ON
 
-      - name: Build
-        run: cmake --build build -j$(sysctl -n hw.ncpu)
-
-      - name: Inspect hardcoded SHARED
+      - name: Build llama-cli and llama-server
         run: |
-          echo "=== Checking for hardcoded SHARED in tools ==="
-          grep -R "add_library.*SHARED" build/CMakeFiles/ 2>/dev/null || echo "No SHARED forced"
-          grep -R "add_library.*llama-cli-impl\|add_library.*llama-server-impl" build/CMakeFiles/ 2>/dev/null || echo "No impl SHARED"
+          set -eu
+          cmake --build "$GITHUB_WORKSPACE/build-ios" \
+            --target llama-cli llama-server \
+            --parallel "$(sysctl -n hw.ncpu)"
 
       - name: Collect binaries
         run: |
-          mkdir -p out
-          cp build/bin/llama-cli out/ 2>/dev/null || cp build/llama-cli out/ 2>/dev/null
-          cp build/bin/llama-server out/ 2>/dev/null || cp build/llama-server out/ 2>/dev/null
-          ls -lh out/
+          set -eu
+          OUT="$GITHUB_WORKSPACE/out"
+          mkdir -p "$OUT"
+          for name in llama-cli llama-server; do
+            BIN=$(find "$GITHUB_WORKSPACE/build-ios" -type f -name "$name" -not -path '*/CMakeFiles/*' | head -n1)
+            test -n "$BIN"
+            cp "$BIN" "$OUT/$name"
+            chmod +x "$OUT/$name"
+            echo "$name <- $BIN"
+          done
+          ls -l "$OUT"
 
-      - name: Sign with ldid (放开0签名限制)
+      - name: Verify iOS target and no code signature
         run: |
-          # 创建最小 entitlements（允许 Metal、JIT 等）
-          cat > entitlements.plist <<EOF
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-            <key>com.apple.security.cs.allow-jit</key>
-            <true/>
-            <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
-            <true/>
-            <key>com.apple.security.device.metal</key>
-            <true/>
-          </dict>
-          </plist>
-          EOF
-          ldid -S entitlements.plist out/llama-cli
-          ldid -S entitlements.plist out/llama-server
-          echo "=== Signature check ==="
-          otool -l out/llama-cli | grep -A2 LC_CODE_SIGNATURE || echo "No signature section"
+          set -eu
+          for bin in out/llama-cli out/llama-server; do
+            echo "=== $bin ==="
+            file "$bin"
+            lipo -archs "$bin"
+            if otool -l "$bin" | grep -q LC_CODE_SIGNATURE; then
+              echo "::error::$bin contains LC_CODE_SIGNATURE"
+              exit 1
+            fi
+            echo "no LC_CODE_SIGNATURE: OK"
+          done
 
-      - name: Verify
-        run: |
-          stat -f "llama-cli: %z bytes" out/llama-cli
-          stat -f "llama-server: %z bytes" out/llama-server
-          file out/llama-cli
-          otool -L out/llama-cli | head -10
-
-      - name: Upload artifact
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: llama-ios-metal
-          path: out/
+          name: llama-ios-16.4-arm64-unsigned
+          if-no-files-found: error
+          path: |
+            out/llama-cli
+            out/llama-server
