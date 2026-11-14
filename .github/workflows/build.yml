@@ -24,6 +24,15 @@ jobs:
           unzip -q /tmp/llama.zip -d /tmp/
           mv /tmp/llama.cpp-1.0.0 /tmp/llama.cpp
 
+      - name: Patch llama.cpp (remove MACOSX_BUNDLE)
+        run: |
+          # Remove tests entirely to avoid MACOSX_BUNDLE errors
+          rm -rf /tmp/llama.cpp/tests
+          # Patch tools/server/CMakeLists.txt to remove MACOSX_BUNDLE
+          sed -i '' 's/MACOSX_BUNDLE//g' /tmp/llama.cpp/tools/server/CMakeLists.txt
+          # Patch any other MACOSX_BUNDLE in tools
+          find /tmp/llama.cpp/tools -name CMakeLists.txt -exec sed -i '' 's/MACOSX_BUNDLE//g' {} \;
+
       - name: Configure CMake
         run: |
           SDK=$(find "$RUNNER_TEMP/ios-sdk" -name iPhoneOS*.sdk -not -path '*/__MACOSX/*' -type d | head -1)
@@ -44,10 +53,10 @@ jobs:
             -DGGML_BLAS=OFF \
             -DGGML_OPENMP=OFF \
             -DBUILD_SHARED_LIBS=OFF \
-            -DBUILD_TESTING=OFF \
             -DLLAMA_BUILD_TOOLS=ON \
             -DLLAMA_BUILD_SERVER=ON \
             -DLLAMA_BUILD_EXAMPLES=OFF \
+            -DLLAMA_BUILD_TESTS=OFF \
             -DLLAMA_OPENSSL=OFF \
             -DLLAMA_SUBPROCESS=OFF
 
