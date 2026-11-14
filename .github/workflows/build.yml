@@ -6,7 +6,7 @@ on:
       - 'v*'
 env:
   SDK_URL: https://github.com/xybp888/iOS-SDKs/releases/download/iOS18.5-SDKs/iPhoneOS18.5.sdk.zip
-  LLAMA_URL: https://github.com/ggml-org/llama.cpp/archive/refs/tags/v0.9.2.zip
+  LLAMA_URL: https://github.com/ggml-org/llama.cpp/archive/refs/tags/v0.9.1.zip
   DEPLOYMENT_TARGET: "16.4"
 jobs:
   build:
@@ -34,11 +34,11 @@ jobs:
           echo "SDK_DIR=$SDK_DIR" >> $GITHUB_ENV
           echo "SDK path: $SDK_DIR"
 
-      - name: Download & extract llama.cpp v0.9.2
+      - name: Download & extract llama.cpp v0.9.1
         run: |
           curl -L "$LLAMA_URL" -o llama.cpp.zip
           unzip -q llama.cpp.zip
-          mv llama.cpp-0.9.2 llama.cpp
+          mv llama.cpp-0.9.1 llama.cpp
           echo "LLAMA_DIR=$(pwd)/llama.cpp" >> $GITHUB_ENV
 
       - name: Configure CMake (Metal, force iOS 16.4, NBUFFERS=32)
@@ -138,5 +138,5 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: llama-cli-server-ios-arm64-metal-ios16.4-v0.9.2
+          name: llama-cli-server-ios-arm64-metal-ios16.4-v0.9.1
           path: dist/
