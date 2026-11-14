@@ -22,15 +22,17 @@ jobs:
         run: |
           curl -L "$SDK_URL" -o iPhoneOS18.5.sdk.zip
           unzip -q iPhoneOS18.5.sdk.zip
-          if [ -d "iPhoneOS18.5.sdk" ]; then
-            SDK_DIR="$(pwd)/iPhoneOS18.5.sdk"
-          elif [ -d "iPhoneOS18.5.sdk/iPhoneOS18.5.sdk" ]; then
-            SDK_DIR="$(pwd)/iPhoneOS18.5.sdk/iPhoneOS18.5.sdk"
-          else
-            SDK_DIR="$(find . -maxdepth 2 -name '*.sdk' -type d | head -1)"
+          if [ -d "iPhoneOS18.5.sdk/iPhoneOS18.5.sdk" ]; then
+            mv iPhoneOS18.5.sdk/iPhoneOS18.5.sdk ./
           fi
-          echo "SDK_DIR=$SDK_DIR" >> $GITHUB_ENV
-          echo "SDK path: $SDK_DIR"
+          echo "SDK_DIR=$(pwd)/iPhoneOS18.5.sdk" >> $GITHUB_ENV
+          echo "SDK path: $(pwd)/iPhoneOS18.5.sdk"
+
+      - name: Register SDK with Xcode (required for Metal detection)
+        run: |
+          sudo mkdir -p /Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs
+          sudo ln -sfn "${{ env.SDK_DIR }}" /Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS18.5.sdk
+          xcodebuild -sdk iPhoneOS18.5.sdk -version 2>&1 | head -5
 
       - name: Download & extract llama.cpp v0.9.0
         run: |
@@ -44,7 +46,7 @@ jobs:
           cmake -B "$LLAMA_DIR/build-ios-metal" \
             -S "$LLAMA_DIR" \
             -DCMAKE_SYSTEM_NAME=iOS \
-            -DCMAKE_OSX_SYSROOT="${{ env.SDK_DIR }}" \
+            -DCMAKE_OSX_SYSROOT=iPhoneOS18.5.sdk \
             -DCMAKE_OSX_ARCHITECTURES=arm64 \
             -DIPHONEOS_DEPLOYMENT_TARGET=${{ env.DEPLOYMENT_TARGET }} \
             -DCMAKE_BUILD_TYPE=Release \
