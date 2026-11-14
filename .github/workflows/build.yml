@@ -24,8 +24,6 @@ jobs:
           curl -L "$SDK_URL" -o sdk.tar.xz
           mkdir -p sdk
           tar xf sdk.tar.xz -C sdk
-          # theos sdk 解压出来就是 iPhoneOS16.5.sdk 目录
-          ls sdk
           mv sdk/iPhoneOS16.5.sdk "$SDK_DIR"
 
       - name: Install LLVM (clang)
@@ -51,13 +49,10 @@ jobs:
             -DGGML_CPU_KLEIDIAI=ON \
             -DGGML_BLAS=OFF \
             -DGGML_ACCELERATE=OFF \
-            -DBUILD_SHARED_LIBS=OFF
-
-      - name: Clean build (force)
-        run: |
-          cd llama.cpp/build
-          rm -rf * 
-          cd -
+            -DBUILD_SHARED_LIBS=OFF \
+            -DBUILD_TESTING=OFF \
+            -DLLAMA_BUILD_TESTS=OFF \
+            -DLLAMA_BUILD_EXAMPLES=OFF
 
       - name: Build
         run: |
