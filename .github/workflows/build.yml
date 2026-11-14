@@ -26,7 +26,6 @@ jobs:
           rm -rf "$GITHUB_WORKSPACE/sdk/__MACOSX"
           SDK=$(find "$GITHUB_WORKSPACE/sdk" -type d -name '*.sdk' -not -path '*/__MACOSX/*' | head -n1)
           test -n "$SDK"
-          test -d "$SDK/usr/lib"
           test -f "$SDK/usr/lib/libSystem.tbd"
           echo "SDK_DIR=$SDK" >> "$GITHUB_ENV"
           echo "SDK -> $SDK"
@@ -39,9 +38,12 @@ jobs:
           SRC=$(find "$GITHUB_WORKSPACE/src" -maxdepth 1 -mindepth 1 -type d | head -n1)
           mv "$SRC" "$GITHUB_WORKSPACE/llama.cpp"
           test -f "$GITHUB_WORKSPACE/llama.cpp/CMakeLists.txt"
-          echo "source -> $GITHUB_WORKSPACE/llama.cpp"
 
-      - name: Configure (CMake + Ninja, iOS arm64)
+      - name: Inspect upstream lib types
+        run: |
+          grep -RInE "add_library\((llama-server-impl|llama-cli-impl)" "$GITHUB_WORKSPACE/llama.cpp/tools" || true
+
+      - name: Configure (CMake + Ninja, iOS arm64, static libs)
         run: |
           set -eu
           cmake -S "$GITHUB_WORKSPACE/llama.cpp" -B "$GITHUB_WORKSPACE/build-ios" -G Ninja \
@@ -56,6 +58,13 @@ jobs:
             -DCMAKE_RANLIB="$(xcrun --find ranlib)" \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_MACOSX_BUNDLE=OFF \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DBUILD_STATIC_LIBS=ON \
+            -DGGML_SHARED=OFF \
+            -DGGML_STATIC=ON \
+            -DLLAMA_BUILD_SHARED_LIBS=OFF \
+            -DLLAMA_SHARED=OFF \
+            -DLLAMA_STATIC=ON \
             -DGGML_METAL=OFF \
             -DLLAMA_METAL=OFF \
             -DLLAMA_BUILD_SERVER=ON
@@ -67,7 +76,7 @@ jobs:
             --target llama-cli llama-server \
             --parallel "$(sysctl -n hw.ncpu)"
 
-      - name: Collect binaries
+      - name: Collect and self-contain
         run: |
           set -eu
           OUT="$GITHUB_WORKSPACE/out"
@@ -77,17 +86,54 @@ jobs:
             test -n "$BIN"
             cp "$BIN" "$OUT/$name"
             chmod +x "$OUT/$name"
-            echo "$name <- $BIN"
           done
+
+          fix_refs() {
+            f="$1"
+            otool -L "$f" | tail -n +2 | awk '{print $1}' | while read -r dep; do
+              case "$dep" in
+                /usr/lib/*|/System/Library/*) ;;
+                *)
+                  base=$(basename "$dep")
+                  install_name_tool -change "$dep" "@executable_path/$base" "$f" 2>/dev/null || true
+                  ;;
+              esac
+            done
+          }
+
+          BAD=0
+          for name in llama-cli llama-server; do
+            deps=$(otool -L "$OUT/$name" | tail -n +2 | awk '{print $1}')
+            echo "=== $name deps ==="
+            echo "$deps"
+            if echo "$deps" | grep -vqE '^(/usr/lib/|/System/Library/)'; then
+              BAD=1
+            fi
+          done
+
+          if [ "$BAD" -eq 1 ]; then
+            echo "::warning::still linked against non-system dylibs; bundling them next to binaries"
+            cp "$GITHUB_WORKSPACE"/build-ios/bin/*.dylib "$OUT/" 2>/dev/null || true
+            for f in "$OUT"/*; do
+              [ -f "$f" ] || continue
+              file "$f" | grep -q 'Mach-O' || continue
+              if file "$f" | grep -q 'dynamically linked shared library'; then
+                install_name_tool -id "@executable_path/$(basename "$f")" "$f" 2>/dev/null || true
+              fi
+              fix_refs "$f"
+            done
+          fi
+
           ls -l "$OUT"
 
-      - name: Verify iOS target and no code signature
+      - name: Verify
         run: |
           set -eu
           for bin in out/llama-cli out/llama-server; do
             echo "=== $bin ==="
             file "$bin"
             lipo -archs "$bin"
+            stat -f 'size=%z bytes' "$bin"
             if otool -l "$bin" | grep -q LC_CODE_SIGNATURE; then
               echo "::error::$bin contains LC_CODE_SIGNATURE"
               exit 1
@@ -100,6 +146,4 @@ jobs:
         with:
           name: llama-ios-16.4-arm64-unsigned
           if-no-files-found: error
-          path: |
-            out/llama-cli
-            out/llama-server
+          path: out/
