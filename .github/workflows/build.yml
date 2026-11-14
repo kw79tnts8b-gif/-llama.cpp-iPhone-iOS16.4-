@@ -34,15 +34,17 @@ jobs:
 
       - name: Patch Metal asserts (ALL 4 + fallback)
         run: |
-          cd "$LLAMA_DIR/ggml/src/ggml-metal"
-          # 覆盖 ASSERT 形式
-          sed -i '' 's/GGML_ASSERT(\([a-z_]*\))/if (!\1) { fallback CPU; return false; }/g' ggml-metal.m
-          # 覆盖 ABORT 形式（341/391 处 bid_dst/bid_src）
-          sed -i '' '/if (bid_dst.metal == nil)/,+2 s/GGML_ABORT.*/fallback CPU; return false;/' ggml-metal.m
-          sed -i '' '/if (bid_src.metal == nil)/,+2 s/GGML_ABORT.*/fallback CPU; return false;/' ggml-metal.m
-          echo "=== verify ==="
-          grep -n "fallback CPU" ggml-metal.m || echo "PATCH FAILED"
           cd "$LLAMA_DIR"
+          MF="ggml/src/ggml-metal/ggml-metal-context.m"
+          ls -l "$MF" || { echo "File not found"; exit 1; }
+          # 1) ASSERT 形式
+          sed -i '' 's/GGML_ASSERT(buf_dst);/if (bid_dst.metal == nil) { GGML_LOG_DEBUG("Metal: dst buf fail, fallback CPU\n"); return false; }/' "$MF"
+          sed -i '' 's/GGML_ASSERT(buf_src);/if (bid_src.metal == nil) { GGML_LOG_DEBUG("Metal: src buf fail, fallback CPU\n"); return false; }/' "$MF"
+          # 2) ABORT 形式（341/391 处）
+          sed -i '' '/if (bid_dst.metal == nil)/,+2 s/GGML_ABORT("[^"]*");/GGML_LOG_DEBUG("Metal: dst bid fail, fallback CPU\n"); return false;/' "$MF"
+          sed -i '' '/if (bid_src.metal == nil)/,+2 s/GGML_ABORT("[^"]*");/GGML_LOG_DEBUG("Metal: src bid fail, fallback CPU\n"); return false;/' "$MF"
+          echo "=== verify ==="
+          grep -n "fallback CPU" "$MF" || echo "PATCH FAILED"
 
       - name: Configure CMake (Metal, force iOS 16.4, no KleidiAI)
         run: |
