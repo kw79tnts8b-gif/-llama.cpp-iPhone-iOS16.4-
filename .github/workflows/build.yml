@@ -19,16 +19,21 @@ jobs:
 
       - name: Fetch iPhoneOS 17.5 SDK
         run: |
+          set -eu
           mkdir -p "$GITHUB_WORKSPACE/sdk"
           curl -fL --retry 3 --retry-delay 2 -o sdk.zip "$SDK_ZIP_URL"
-          unzip -q sdk.zip -d "$GITHUB_WORKSPACE/sdk"
-          SDK=$(find "$GITHUB_WORKSPACE/sdk" -maxdepth 2 -type d -name '*.sdk' | head -n1)
+          ditto -x -k sdk.zip "$GITHUB_WORKSPACE/sdk"
+          rm -rf "$GITHUB_WORKSPACE/sdk/__MACOSX"
+          SDK=$(find "$GITHUB_WORKSPACE/sdk" -type d -name '*.sdk' -not -path '*/__MACOSX/*' | head -n1)
           test -n "$SDK"
+          test -d "$SDK/usr/lib"
+          test -f "$SDK/usr/lib/libSystem.tbd"
           echo "SDK_DIR=$SDK" >> "$GITHUB_ENV"
           echo "SDK -> $SDK"
 
       - name: Fetch llama.cpp v1.0.0
         run: |
+          set -eu
           curl -fL --retry 3 --retry-delay 2 -o llama.zip "$LLAMA_ZIP_URL"
           unzip -q llama.zip -d "$GITHUB_WORKSPACE/src"
           SRC=$(find "$GITHUB_WORKSPACE/src" -maxdepth 1 -mindepth 1 -type d | head -n1)
@@ -38,32 +43,48 @@ jobs:
 
       - name: Configure (CMake + Ninja, iOS arm64)
         run: |
+          set -eu
           cmake -S "$GITHUB_WORKSPACE/llama.cpp" -B "$GITHUB_WORKSPACE/build-ios" -G Ninja \
             -DCMAKE_SYSTEM_NAME=iOS \
             -DCMAKE_SYSTEM_VERSION="$MIN_IOS" \
             -DCMAKE_OSX_SYSROOT="$SDK_DIR" \
             -DCMAKE_OSX_ARCHITECTURES=arm64 \
             -DCMAKE_OSX_DEPLOYMENT_TARGET="$MIN_IOS" \
-            -DCMAKE_FIND_ROOT_PATH="$SDK_DIR" \
             -DCMAKE_C_COMPILER="$(xcrun --find clang)" \
             -DCMAKE_CXX_COMPILER="$(xcrun --find clang++)" \
             -DCMAKE_AR="$(xcrun --find ar)" \
             -DCMAKE_RANLIB="$(xcrun --find ranlib)" \
             -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_MACOSX_BUNDLE=OFF \
             -DGGML_METAL=OFF \
             -DLLAMA_METAL=OFF \
             -DLLAMA_BUILD_SERVER=ON
 
       - name: Build llama-cli and llama-server
         run: |
+          set -eu
           cmake --build "$GITHUB_WORKSPACE/build-ios" \
             --target llama-cli llama-server \
             --parallel "$(sysctl -n hw.ncpu)"
 
+      - name: Collect binaries
+        run: |
+          set -eu
+          OUT="$GITHUB_WORKSPACE/out"
+          mkdir -p "$OUT"
+          for name in llama-cli llama-server; do
+            BIN=$(find "$GITHUB_WORKSPACE/build-ios" -type f -name "$name" -not -path '*/CMakeFiles/*' | head -n1)
+            test -n "$BIN"
+            cp "$BIN" "$OUT/$name"
+            chmod +x "$OUT/$name"
+            echo "$name <- $BIN"
+          done
+          ls -l "$OUT"
+
       - name: Verify iOS target and no code signature
         run: |
-          set -e
-          for bin in build-ios/bin/llama-cli build-ios/bin/llama-server; do
+          set -eu
+          for bin in out/llama-cli out/llama-server; do
             echo "=== $bin ==="
             file "$bin"
             lipo -archs "$bin"
@@ -80,5 +101,5 @@ jobs:
           name: llama-ios-16.4-arm64-unsigned
           if-no-files-found: error
           path: |
-            build-ios/bin/llama-cli
-            build-ios/bin/llama-server
+            out/llama-cli
+            out/llama-server
