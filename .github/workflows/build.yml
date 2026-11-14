@@ -1,111 +1,71 @@
-name: Build llama.cpp for iOS (jailbroken, arm64, Metal GPU)
+name: Build llama-cli & llama-server for iOS (jailbreak, no-sign)
 
 on:
   workflow_dispatch:
-  push:
-    tags:
-      - 'v*'
-
-env:
-  SDK_URL: https://github.com/xybp888/iOS-SDKs/releases/download/iOS17.5-SDKs/iPhoneOS17.5.sdk.zip
-  LLAMA_URL: https://github.com/ggml-org/llama.cpp/archive/refs/tags/v0.9.0.zip
-  DEPLOYMENT_TARGET: "16.4"
 
 jobs:
   build:
     runs-on: macos-15
 
     steps:
-      - name: Checkout (minimal, no git history needed)
+      - name: Checkout dummy
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
 
-      - name: Download & extract iPhoneOS SDK
+      - name: Download llama.cpp v1.0.0
         run: |
-          curl -L "$SDK_URL" -o iPhoneOS17.5.sdk.zip
-          unzip -q iPhoneOS17.5.sdk.zip
-          if [ -d "iPhoneOS17.5.sdk" ]; then
-            SDK_DIR="$(pwd)/iPhoneOS17.5.sdk"
-          elif [ -d "iPhoneOS17.5.sdk/iPhoneOS17.5.sdk" ]; then
-            SDK_DIR="$(pwd)/iPhoneOS17.5.sdk/iPhoneOS17.5.sdk"
-          else
-            SDK_DIR="$(find . -maxdepth 2 -name '*.sdk' -type d | head -1)"
-          fi
-          echo "SDK_DIR=$SDK_DIR" >> $GITHUB_ENV
-          echo "SDK path: $SDK_DIR"
+          curl -L -o llama.cpp.zip https://github.com/ggml-org/llama.cpp/archive/refs/tags/v1.0.0.zip
 
-      - name: Download & extract llama.cpp v0.9.0
+      - name: Unzip llama.cpp
         run: |
-          curl -L "$LLAMA_URL" -o llama.cpp.zip
           unzip -q llama.cpp.zip
-          mv llama.cpp-0.9.0 llama.cpp
-          echo "LLAMA_DIR=$(pwd)/llama.cpp" >> $GITHUB_ENV
+          # 解压后目录：llama.cpp-1.0.0/
 
-      - name: Configure CMake (Metal GPU enabled)
+      - name: Download iPhoneOS17.5.sdk
         run: |
-          cmake -B "$LLAMA_DIR/build-ios" \
-            -S "$LLAMA_DIR" \
+          curl -L -o iPhoneOS17.5.sdk.zip https://github.com/xybp888/iOS-SDKs/releases/download/iOS17.5-SDKs/iPhoneOS17.5.sdk.zip
+
+      - name: Unzip iPhoneOS17.5.sdk
+        run: |
+          unzip -q iPhoneOS17.5.sdk.zip
+          # 解压后目录：iPhoneOS17.5.sdk/
+
+      - name: Configure CMake (Xcode, iOS arm64, no Metal, no sign)
+        run: |
+          cmake -B build -G Xcode \
             -DCMAKE_SYSTEM_NAME=iOS \
-            -DCMAKE_OSX_SYSROOT="${{ env.SDK_DIR }}" \
+            -DCMAKE_OSX_SYSROOT="$(pwd)/iPhoneOS17.5.sdk" \
             -DCMAKE_OSX_ARCHITECTURES=arm64 \
-            -DIPHONEOS_DEPLOYMENT_TARGET=${{ env.DEPLOYMENT_TARGET }} \
-            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=16.4 \
+            -DIPHONEOS_DEPLOYMENT_TARGET=16.4 \
             -DBUILD_SHARED_LIBS=OFF \
-            -DCMAKE_CODE_SIGN_IDENTITY="" \
-            -DCMAKE_MACOSX_BUNDLE=OFF \
-            -DLLAMA_STATIC=ON \
-            -DGGML_STATIC=ON \
-            -DLLAMA_NATIVE=OFF \
+            -DGGML_METAL=OFF \
             -DGGML_NATIVE=OFF \
+            -DGGML_OPENMP=OFF \
+            -DGGML_BLAS=OFF \
+            -DGGML_CPU=ON \
             -DLLAMA_BUILD_COMMON=ON \
             -DLLAMA_BUILD_TOOLS=ON \
             -DLLAMA_BUILD_SERVER=ON \
-            -DLLAMA_BUILD_TESTS=OFF \
             -DLLAMA_BUILD_EXAMPLES=OFF \
+            -DLLAMA_BUILD_TESTS=OFF \
             -DLLAMA_BUILD_APP=OFF \
-            -DLLAMA_BUILD_UI=OFF \
-            -DLLAMA_BUILD_MTMD=OFF \
-            -DLLAMA_OPENSSL=OFF \
-            -DLLAMA_ALL_WARNINGS=OFF \
-            -DGGML_CPU=ON \
-            -DGGML_CPU_REPACK=ON \
-            -DGGML_CPU_KLEIDIAI=ON \
-            -DGGML_METAL=ON \
-            -DGGML_METAL_EMBED_LIBRARY=ON \
-            -DGGML_ACCELERATE=OFF \
-            -DGGML_BLAS=OFF \
-            -DGGML_BACKEND_DL=OFF
+            -DLLAMA_CURL=OFF \
+            -DLLAMA_BUILD_IS_DEV=OFF \
+            -S llama.cpp-1.0.0
 
-      - name: Build
+      - name: Build llama-cli and llama-server only
         run: |
-          cmake --build "$LLAMA_DIR/build-ios" --config Release --parallel $(sysctl -n hw.ncpu)
+          cmake --build build --config Release --target llama-cli llama-server
 
-      - name: Ad-hoc codesign (binary + metallib)
+      - name: Strip binaries (no codesign, no entitlements)
         run: |
-          find "$LLAMA_DIR/build-ios" -name "llama-cli" -exec codesign --force --sign - {} \;
-          find "$LLAMA_DIR/build-ios" -name "llama-server" -exec codesign --force --sign - {} \;
-          find "$LLAMA_DIR/build-ios" -name "default.metallib" -exec codesign --force --sign - {} \;
-
-      - name: Collect artifacts (binaries + metallib together)
-        run: |
-          mkdir -p dist
-          cp "$LLAMA_DIR/build-ios/bin/llama-cli" dist/ || true
-          cp "$LLAMA_DIR/build-ios/bin/llama-server" dist/ || true
-          cp "$LLAMA_DIR/ggml/src/ggml-metal.metal" dist/ 2>/dev/null || true
-          # embedded metallib (built into binary) + standalone default.metallib
-          find "$LLAMA_DIR/build-ios" -name "default.metallib" -exec cp {} dist/ \;
-          if [ ! -f "dist/llama-cli" ]; then
-            find "$LLAMA_DIR/build-ios" -name "llama-cli" -exec cp {} dist/ \;
-          fi
-          if [ ! -f "dist/llama-server" ]; then
-            find "$LLAMA_DIR/build-ios" -name "llama-server" -exec cp {} dist/ \;
-          fi
-          chmod +x dist/llama-cli dist/llama-server
-          ls -lh dist/
+          strip build/Release/llama-cli || true
+          strip build/Release/llama-server || true
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: llama-cli-server-ios-arm64-metal
-          path: dist/
+          name: llama-ios-arm64-nosign
+          path: |
+            build/Release/llama-cli
+            build/Release/llama-server
