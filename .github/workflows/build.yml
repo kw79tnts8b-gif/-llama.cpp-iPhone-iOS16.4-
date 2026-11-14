@@ -41,6 +41,32 @@ jobs:
           mv llama.cpp-0.8.0 llama.cpp
           echo "LLAMA_DIR=$(pwd)/llama.cpp" >> $GITHUB_ENV
 
+      - name: Patch ggml-metal assert (fallback to CPU on buffer alloc failure)
+        run: |
+          cd "$LLAMA_DIR"
+          # Patch ggml_metal_cpy_tensor_async: replace GGML_ASSERT(buf_dst) with fallback
+          sed -i '' '/GGML_ASSERT(buf_dst);/{
+            s/GGML_ASSERT(buf_dst);//
+            i\
+            if (bid_dst.metal == nil) {\
+                GGML_LOG_DEBUG("Metal: dst buffer allocation failed, falling back to CPU\\n");\
+                return false;\
+            }
+          }' ggml/src/ggml-metal/ggml-metal-context.m
+
+          # Patch buf_src assert in the same function
+          sed -i '' '/GGML_ASSERT(buf_src);/{
+            s/GGML_ASSERT(buf_src);//
+            i\
+            if (bid_src.metal == nil) {\
+                GGML_LOG_DEBUG("Metal: src buffer allocation failed, falling back to CPU\\n");\
+                return false;\
+            }
+          }' ggml/src/ggml-metal/ggml-metal-context.m
+
+          echo "=== Verify patch ==="
+          grep -n -A3 "metal == nil" ggml/src/ggml-metal/ggml-metal-context.m | head -20
+
       - name: Configure CMake (Metal, force iOS 16.4, NBUFFERS=32)
         run: |
           cmake -B "$LLAMA_DIR/build-ios" \
@@ -138,5 +164,5 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: llama-cli-server-ios-arm64-metal-ios16.4-v0.8.0-nbuffers32
+          name: llama-cli-server-ios-arm64-metal-ios16.4-v0.8.0-patched
           path: dist/
