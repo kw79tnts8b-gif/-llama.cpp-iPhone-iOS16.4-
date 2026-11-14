@@ -1,33 +1,44 @@
-name: Build llama.cpp iOS Metal
+name: Build llama.cpp iOS Metal (Signed)
 
 on:
   workflow_dispatch:
 
+env:
+  LLAMA_ZIP_URL: https://github.com/ggml-org/llama.cpp/archive/refs/tags/v1.0.0.zip
+  # 修复点：补上完整的 SDK 下载地址
+  SDK_ZIP_URL: https://github.com/xybp888/iOS-SDKs/releases/download/iOS17.5-SDKs/iPhoneOS17.5.sdk.zip
+  MIN_IOS: 16.4
+
 jobs:
   build:
-    runs-on: macos-15
-
+    runs-on: macos-latest
     steps:
-      - name: Checkout llama.cpp v1.0.0
-        run: |
-          curl -L https://github.com/ggml-org/llama.cpp/archive/refs/tags/v1.0.0.tar.gz -o llama.cpp.tar.gz
-          tar xzf llama.cpp.tar.gz
-          mv llama.cpp-1.0.0 llama.cpp
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Install dependencies
-        run: |
-          brew install cmake ninja ldid
-
+      # ---------- Prepare iOS SDK ----------
       - name: Prepare iOS SDK
         run: |
-          mkdir -p $HOME/ios-sdk
-          curl -L ${{ secrets.IOS_SDK_URL }} -o sdk.zip
-          unzip sdk.zip -d $HOME/ios-sdk/
-          echo "SDK_ROOT=$HOME/ios-sdk/iPhoneOS17.5.sdk" >> $GITHUB_ENV
+          set -eu
+          mkdir -p "$HOME/ios-sdk"
+          curl -L -o sdk.zip "$SDK_ZIP_URL"
+          unzip -o sdk.zip -d "$HOME/ios-sdk/"
+          echo "SDK_ROOT=$HOME/ios-sdk/iPhoneOS17.5.sdk" >> "$GITHUB_ENV"
+          test -d "$HOME/ios-sdk/iPhoneOS17.5.sdk"
 
-      - name: Create entitlements.xml
+      # ---------- Download llama.cpp ----------
+      - name: Download llama.cpp
         run: |
-          cat > entitlements.xml << 'EOF'
+          set -eu
+          curl -L -o llama.zip "$LLAMA_ZIP_URL"
+          unzip -o llama.zip
+          mv llama.cpp-* llama.cpp
+
+      # ---------- Create entitlements.xml ----------
+      - name: Create entitlements.xml
+        working-directory: llama.cpp
+        run: |
+          cat > entitlements.xml <<'EOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
@@ -42,87 +53,93 @@ jobs:
           </plist>
           EOF
 
+      # ---------- Configure CMake (Metal ON) ----------
       - name: Configure CMake
         working-directory: llama.cpp
         run: |
-          cmake -S . -B build \
-            -G Ninja \
+          set -eu
+          cmake -B build-ios \
             -DCMAKE_SYSTEM_NAME=iOS \
-            -DCMAKE_SYSTEM_VERSION=16.4 \
+            -DCMAKE_OSX_SYSROOT="$SDK_ROOT" \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET="$MIN_IOS" \
             -DCMAKE_OSX_ARCHITECTURES=arm64 \
-            -DCMAKE_OSX_SYSROOT=$SDK_ROOT \
-            -DCMAKE_C_COMPILER=clang \
-            -DCMAKE_CXX_COMPILER=clang++ \
             -DCMAKE_C_FLAGS="-march=armv8.4-a" \
             -DCMAKE_CXX_FLAGS="-march=armv8.4-a" \
-            -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_SHARED_LIBS=OFF \
             -DGGML_SHARED=OFF \
+            -DLLAMA_BUILD_SHARED_LIBS=OFF \
             -DGGML_STATIC=ON \
+            -DLLAMA_STATIC=ON \
             -DGGML_METAL=ON \
             -DGGML_METAL_EMBED_LIBRARY=ON \
-            -DGGML_BLAS=OFF \
-            -DLLAMA_BUILD_SHARED_LIBS=OFF \
-            -DLLAMA_SHARED=OFF \
-            -DLLAMA_STATIC=ON \
-            -DCMAKE_MACOSX_BUNDLE=OFF \
-            -DCMAKE_INSTALL_PREFIX=$PWD/out
+            -DLLAMA_CLI=ON \
+            -DLLAMA_SERVER=ON \
+            -DCMAKE_BUILD_TYPE=Release
 
+      # ---------- Build ----------
       - name: Build
         working-directory: llama.cpp
         run: |
-          cmake --build build --target llama-cli llama-server -j$(sysctl -n hw.ncpu)
+          set -eu
+          cmake --build build-ios --target llama-cli llama-server --parallel "$(sysctl -n hw.ncpu)"
 
+      # ---------- Inspect linkage ----------
       - name: Inspect linkage
         working-directory: llama.cpp
         run: |
-          echo "=== llama-cli otool ==="
-          otool -L build/bin/llama-cli || true
-          echo "=== llama-server otool ==="
-          otool -L build/bin/llama-server || true
-          echo "=== libggml-metal ==="
-          ls -la build/src/libggml-metal* || true
-          otool -L build/src/libggml-metal.dylib || true
+          set -eu
+          echo "=== llama-cli deps ==="
+          otool -L build-ios/bin/llama-cli || true
+          echo "=== libggml-metal deps ==="
+          otool -L build-ios/bin/libggml-metal.dylib 2>/dev/null || echo "metal dylib not at bin/"
 
+      # ---------- Collect artifacts ----------
       - name: Collect artifacts
         working-directory: llama.cpp
         run: |
+          set -eu
+          rm -rf out
           mkdir -p out
-          cp build/bin/llama-cli out/
-          cp build/bin/llama-server out/
-          # Metal dylib
-          cp build/src/libggml-metal.dylib out/ 2>/dev/null || true
-          # 兜底：如果没嵌 metallib，单独拷
-          cp build/src/default.metallib out/ 2>/dev/null || true
+          cp build-ios/bin/llama-cli out/
+          cp build-ios/bin/llama-server out/
+          # 拷贝 Metal 动态库（运行时 dlopen 必需）
+          find build-ios -name 'libggml-metal.dylib' -exec cp {} out/ \; 2>/dev/null || true
+          # 兜底 metallib（若未嵌入）
+          find build-ios -name 'default.metallib' -exec cp {} out/ \; 2>/dev/null || true
           chmod +x out/llama-cli out/llama-server
 
+      # ---------- Sign with ldid (已放开 0 签名限制) ----------
       - name: Sign with ldid
         working-directory: llama.cpp
         run: |
-          # 签 Metal dylib（先签依赖）
+          set -eu
+          brew install ldid || true
+          # 先签 Metal dylib
           if [ -f out/libggml-metal.dylib ]; then
             ldid -Sentitlements.xml out/libggml-metal.dylib
             echo "Signed libggml-metal.dylib"
           fi
-          # 签可执行文件
+          # 签主程序（带 GPU entitlement，解决 Metal dlopen 权限）
           ldid -Sentitlements.xml out/llama-cli
           ldid -Sentitlements.xml out/llama-server
           echo "Signed llama-cli and llama-server"
 
-      - name: Verify signatures
+      # ---------- Verify ----------
+      - name: Verify
         working-directory: llama.cpp
         run: |
-          echo "=== Signature check ==="
-          codesign -vvv out/llama-cli 2>&1 || true
-          otool -l out/llama-cli | grep -A2 LC_CODE_SIGNATURE || echo "No LC_CODE_SIGNATURE (expected with ldid)"
-          echo "=== File sizes ==="
-          stat -f "%z bytes  %N" out/llama-cli out/llama-server
-          if [ -f out/libggml-metal.dylib ]; then
-            stat -f "%z bytes  %N" out/libggml-metal.dylib
-          fi
+          set -eu
+          for bin in out/llama-cli out/llama-server; do
+            file "$bin"
+            lipo -archs "$bin"
+            stat -f 'size=%z bytes' "$bin"
+            # 确认 entitlements 已注入
+            ldid -e "$bin" | grep -q "com.apple.security.gpu" && echo "GPU entitlement OK" || echo "WARNING: GPU entitlement missing"
+          done
 
+      # ---------- Upload ----------
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: llama-cpp-ios-metal
+          name: llama-cpp-ios-metal-signed
           path: llama.cpp/out/*
