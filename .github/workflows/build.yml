@@ -13,7 +13,6 @@ jobs:
       - name: Checkout llama.cpp v0.9.0
         run: |
           git clone --depth 1 --branch v0.9.0 https://github.com/ggml-org/llama.cpp.git
-          cd llama.cpp && git fetch --depth 1 origin tag v0.9.0 && git checkout v0.9.0
 
       - name: Install CMake & Ninja
         run: |
@@ -21,12 +20,11 @@ jobs:
 
       - name: Download iPhoneOS17.5 SDK (community)
         run: |
-          mkdir -p /opt/ios-sdk
-          curl -L -o /tmp/iPhoneOS17.5.sdk.zip \
+          mkdir -p "$RUNNER_TEMP/ios-sdk"
+          curl -L -o "$RUNNER_TEMP/iPhoneOS17.5.sdk.zip" \
             https://github.com/xybp888/iOS-SDKs/releases/download/iOS17.5-SDKs/iPhoneOS17.5.sdk.zip
-          unzip -q /tmp/iPhoneOS17.5.sdk.zip -d /opt/ios-sdk/
-          # 社区包解压后可能是 iPhoneOS17.5.sdk 目录，确认路径
-          SDK_PATH=$(find /opt/ios-sdk -name "iPhoneOS17.5.sdk" -maxdepth 3 -type d | head -n1)
+          unzip -q "$RUNNER_TEMP/iPhoneOS17.5.sdk.zip" -d "$RUNNER_TEMP/ios-sdk/"
+          SDK_PATH=$(find "$RUNNER_TEMP/ios-sdk" -name "iPhoneOS17.5.sdk" -maxdepth 3 -type d | head -n1)
           echo "SDK_PATH=$SDK_PATH" >> $GITHUB_ENV
           echo "Found SDK at: $SDK_PATH"
 
@@ -62,7 +60,6 @@ jobs:
           mkdir -p artifacts
           find llama.cpp/build-ios -type f -name "llama-cli" -exec cp {} artifacts/ \;
           find llama.cpp/build-ios -type f -name "llama-server" -exec cp {} artifacts/ \;
-          # 把 embedded metal 库也带上（如果独立存在）
           find llama.cpp/build-ios -type f -name "ggml-metal.metallib" -exec cp {} artifacts/ \;
           ls -lh artifacts/
 
@@ -71,7 +68,6 @@ jobs:
           cd artifacts
           xcrun strip llama-cli 2>/dev/null || true
           xcrun strip llama-server 2>/dev/null || true
-          # 越狱环境用 ldid 签 ad-hoc（runner 上可能没有 ldid，仅本地再签也行）
           which ldid >/dev/null 2>&1 && ldid -S llama-cli; ldid -S llama-server || echo "ldid not present, sign on device later"
 
       - name: Upload artifact
