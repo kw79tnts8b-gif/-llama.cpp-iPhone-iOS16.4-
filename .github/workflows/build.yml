@@ -1,51 +1,83 @@
-name: Build llama.cpp iOS (Metal)
-
+name: Build llama.cpp for iOS (jailbroken, arm64, Metal)
 on:
   workflow_dispatch:
-
+env:
+  SDK_URL: https://github.com/xybp888/iOS-SDKs/releases/download/iOS18.5-SDKs/iPhoneOS18.5.sdk.zip
+  LLAMA_URL: https://github.com/ggml-org/llama.cpp/archive/refs/tags/v0.9.0.zip
+  DEPLOYMENT_TARGET: "16.4"
 jobs:
-  build-ios:
+  build:
     runs-on: macos-15
-
-    env:
-      LLAMA_DIR: ${{ github.workspace }}/llama.cpp
-
     steps:
-      - name: Checkout llama.cpp
+      - name: Checkout
         uses: actions/checkout@v4
         with:
-          repository: ggml-org/llama.cpp
-          ref: b1-c4d1ffc
-          path: llama.cpp
+          fetch-depth: 1
 
-      - name: Install dependencies
+      - name: Download & extract iPhoneOS SDK
         run: |
-          brew install cmake ninja
+          curl -L "$SDK_URL" -o iPhoneOS18.5.sdk.zip
+          unzip -q iPhoneOS18.5.sdk.zip
+          if [ -d "iPhoneOS18.5.sdk/iPhoneOS18.5.sdk" ]; then
+            mv iPhoneOS18.5.sdk/iPhoneOS18.5.sdk ./
+          fi
+          echo "SDK_DIR=$(pwd)/iPhoneOS18.5.sdk" >> $GITHUB_ENV
+          echo "SDK path: $(pwd)/iPhoneOS18.5.sdk"
 
-      - name: Configure (iOS arm64 + Metal, deployment target 16.4)
-        working-directory: ${{ env.LLAMA_DIR }}
+      - name: Download & extract llama.cpp v0.9.0
         run: |
-          cmake -B build-ios-metal -G Ninja \
+          curl -L "$LLAMA_URL" -o llama.cpp.zip
+          unzip -q llama.cpp.zip
+          mv llama.cpp-0.9.0 llama.cpp
+          echo "LLAMA_DIR=$(pwd)/llama.cpp" >> $GITHUB_ENV
+
+      - name: Configure CMake (Metal, fully manual toolchain)
+        run: |
+          XCODE_DIR=$(xcode-select -p)
+          CC="$XCODE_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang"
+          CXX="$XCODE_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang++"
+          cmake -B "$LLAMA_DIR/build-ios-metal" \
+            -S "$LLAMA_DIR" \
             -DCMAKE_SYSTEM_NAME=iOS \
-            -DCMAKE_OSX_SYSROOT=/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk \
+            -DCMAKE_OSX_SYSROOT="${{ env.SDK_DIR }}" \
             -DCMAKE_OSX_ARCHITECTURES=arm64 \
-            -DCMAKE_OSX_DEPLOYMENT_TARGET=16.4 \
-            -DCMAKE_C_COMPILER=$(xcrun --find clang) \
-            -DCMAKE_CXX_COMPILER=$(xcrun --find clang++) \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=${{ env.DEPLOYMENT_TARGET }} \
+            -DIPHONEOS_DEPLOYMENT_TARGET=${{ env.DEPLOYMENT_TARGET }} \
+            -DGGML_METAL_TARGET_OS=ios \
+            -DCMAKE_C_COMPILER="$CC" \
+            -DCMAKE_CXX_COMPILER="$CXX" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DCMAKE_CODE_SIGN_IDENTITY="" \
+            -DCMAKE_MACOSX_BUNDLE=OFF \
+            -DLLAMA_STATIC=ON \
+            -DGGML_STATIC=ON \
+            -DLLAMA_NATIVE=OFF \
+            -DGGML_NATIVE=OFF \
+            -DLLAMA_BUILD_COMMON=ON \
+            -DLLAMA_BUILD_TOOLS=ON \
+            -DLLAMA_BUILD_SERVER=ON \
+            -DLLAMA_BUILD_TESTS=OFF \
+            -DLLAMA_BUILD_EXAMPLES=OFF \
+            -DLLAMA_BUILD_APP=OFF \
+            -DLLAMA_BUILD_UI=OFF \
+            -DLLAMA_BUILD_MTMD=OFF \
+            -DLLAMA_OPENSSL=OFF \
+            -DLLAMA_ALL_WARNINGS=OFF \
+            -DGGML_CPU=ON \
+            -DGGML_CPU_REPACK=ON \
+            -DGGML_CPU_KLEIDIAI=ON \
             -DGGML_METAL=ON \
             -DGGML_METAL_EMBED_LIBRARY=OFF \
-            -DGGML_METAL_TARGET_OS=ios \
-            -DGGML_CPU_KLEIDIAI=ON \
-            -DLLAMA_BUILD_SERVER=ON \
-            -DLLAMA_BUILD_CLI=ON
+            -DGGML_ACCELERATE=OFF \
+            -DGGML_BLAS=OFF \
+            -DGGML_BACKEND_DL=OFF
 
       - name: Build
-        working-directory: ${{ env.LLAMA_DIR }}
         run: |
-          cmake --build build-ios-metal -j$(sysctl -n hw.ncpu)
+          cmake --build "$LLAMA_DIR/build-ios-metal" --config Release --parallel $(sysctl -n hw.ncpu)
 
-      - name: Ad-hoc codesign (macOS runner)
-        working-directory: ${{ env.LLAMA_DIR }}
+      - name: Ad-hoc codesign for jailbroken iOS
         run: |
           ENT=$(mktemp).plist
           cat > "$ENT" <<'PLIST'
@@ -64,14 +96,21 @@ jobs:
           rm "$ENT"
 
       - name: Collect artifacts
-        working-directory: ${{ env.LLAMA_DIR }}
         run: |
-          mkdir -p artifacts
-          cp build-ios-metal/bin/llama-cli artifacts/llama-cli-metal
-          cp build-ios-metal/bin/llama-server artifacts/llama-server-metal
+          mkdir -p dist
+          cp "$LLAMA_DIR/build-ios-metal/bin/llama-cli" dist/ || true
+          cp "$LLAMA_DIR/build-ios-metal/bin/llama-server" dist/ || true
+          if [ ! -f "dist/llama-cli" ]; then
+            find "$LLAMA_DIR/build-ios-metal" -name "llama-cli" -exec cp {} dist/ \;
+          fi
+          if [ ! -f "dist/llama-server" ]; then
+            find "$LLAMA_DIR/build-ios-metal" -name "llama-server" -exec cp {} dist/ \;
+          fi
+          chmod +x dist/llama-cli dist/llama-server
+          ls -lh dist/
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: llama-cli-server-ios-arm64-metal
-          path: ${{ env.LLAMA_DIR }}/artifacts/*
+          path: dist/
