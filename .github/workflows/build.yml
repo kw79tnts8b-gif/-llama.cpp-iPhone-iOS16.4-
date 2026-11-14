@@ -1,99 +1,101 @@
 name: Build llama.cpp for iOS (jailbroken, arm64, Metal, iOS 16.4)
-
 on:
   workflow_dispatch:
-
+  push:
+    tags:
+      - 'v*'
 env:
   SDK_URL: https://github.com/xybp888/iOS-SDKs/releases/download/iOS18.5-SDKs/iPhoneOS18.5.sdk.zip
   LLAMA_URL: https://github.com/ggml-org/llama.cpp/archive/refs/tags/v0.8.0.zip
   DEPLOYMENT_TARGET: "16.4"
-
 jobs:
   build:
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
-      - name: Download iOS SDK
-        run: |
-          curl -L -o iPhoneOS.sdk.zip "$SDK_URL"
-          unzip -q iPhoneOS.sdk.zip
-          sudo mv iPhoneOS18.5.sdk /usr/local/share/iPhoneOS.sdk
+      - name: Install ldid
+        run: brew install ldid
 
-      - name: Download llama.cpp
+      - name: Download & extract iPhoneOS SDK
         run: |
-          curl -L -o llama.zip "$LLAMA_URL"
-          unzip -q llama.zip
+          curl -L "$SDK_URL" -o iPhoneOS18.5.sdk.zip
+          unzip -q iPhoneOS18.5.sdk.zip
+          if [ -d "iPhoneOS18.5.sdk" ]; then
+            SDK_DIR="$(pwd)/iPhoneOS18.5.sdk"
+          elif [ -d "iPhoneOS18.5.sdk/iPhoneOS18.5.sdk" ]; then
+            SDK_DIR="$(pwd)/iPhoneOS18.5.sdk/iPhoneOS18.5.sdk"
+          else
+            SDK_DIR="$(find . -maxdepth 2 -name '*.sdk' -type d | head -1)"
+          fi
+          echo "SDK_DIR=$SDK_DIR" >> $GITHUB_ENV
+          echo "SDK path: $SDK_DIR"
+
+      - name: Download & extract llama.cpp v0.8.0
+        run: |
+          curl -L "$LLAMA_URL" -o llama.cpp.zip
+          unzip -q llama.cpp.zip
           mv llama.cpp-0.8.0 llama.cpp
           echo "LLAMA_DIR=$(pwd)/llama.cpp" >> $GITHUB_ENV
 
-      - name: Patch Metal assert (robust python fallback)
+      - name: Patch ggml-metal assert (Python, full coverage)
         run: |
           cd "$LLAMA_DIR"
-          python3 - <<'PY'
+          python3 -c '
           import re
           f = "ggml/src/ggml-metal/ggml-metal-context.m"
           s = open(f).read()
 
-          # 1) 替换 GGML_ASSERT(buf_dst); -> fallback
+          # GGML_ASSERT(buf_dst)
           s = s.replace(
               "GGML_ASSERT(buf_dst);",
-              'if (bid_dst.metal == nil) {\n'
-              '        GGML_LOG_DEBUG("Metal: buf_dst alloc failed, fallback CPU\\n");\n'
-              '        return false;\n'
-              '    }'
+              "if (bid_dst.metal == nil) { GGML_LOG_DEBUG(\"Metal: dst buf fail, fallback CPU\n\"); return false; }"
           )
-          # 2) 替换 GGML_ASSERT(buf_src); -> fallback
+
+          # GGML_ASSERT(buf_src)
           s = s.replace(
               "GGML_ASSERT(buf_src);",
-              'if (bid_src.metal == nil) {\n'
-              '        GGML_LOG_DEBUG("Metal: buf_src alloc failed, fallback CPU\\n");\n'
-              '        return false;\n'
-              '    }'
-          )
-          # 3) 替换 if(bid_dst.metal==nil){GGML_ABORT} -> fallback
-          s = s.replace(
-              'if (bid_dst.metal == nil) {\n'
-              '        GGML_ABORT("%s: failed to find buffer for tensor \'%s\'\\n", __func__, tensor->name);\n'
-              '    }',
-              'if (bid_dst.metal == nil) {\n'
-              '        GGML_LOG_DEBUG("Metal: bid_dst missing, fallback CPU\\n");\n'
-              '        return false;\n'
-              '    }'
-          )
-          # 4) 替换 if(bid_src.metal==nil){GGML_ABORT} -> fallback
-          s = s.replace(
-              'if (bid_src.metal == nil) {\n'
-              '        GGML_ABORT("%s: failed to find buffer for tensor \'%s\'\\n", __func__, tensor->name);\n'
-              '    }',
-              'if (bid_src.metal == nil) {\n'
-              '        GGML_LOG_DEBUG("Metal: bid_src missing, fallback CPU\\n");\n'
-              '        return false;\n'
-              '    }'
+              "if (bid_src.metal == nil) { GGML_LOG_DEBUG(\"Metal: src buf fail, fallback CPU\n\"); return false; }"
           )
 
-          open(f,"w").write(s)
-          print("patched")
-          PY
-          grep -n -E "fallback CPU|bid_(dst|src).metal == nil" ggml/src/ggml-metal/ggml-metal-context.m | head -30
+          # GGML_ABORT blocks for bid_dst / bid_src
+          s = re.sub(
+              r"if \(bid_dst\.metal == nil\) \{\s*GGML_ABORT\([^)]*\);\s*\}",
+              "if (bid_dst.metal == nil) { GGML_LOG_DEBUG(\"Metal: dst bid fail, fallback CPU\n\"); return false; }",
+              s
+          )
+          s = re.sub(
+              r"if \(bid_src\.metal == nil\) \{\s*GGML_ABORT\([^)]*\);\s*\}",
+              "if (bid_src.metal == nil) { GGML_LOG_DEBUG(\"Metal: src bid fail, fallback CPU\n\"); return false; }",
+              s
+          )
 
-      - name: Install ldid
-        run: brew install ldid || true
+          open(f, "w").write(s)
+          print("Patch applied")
+          '
+          echo "=== Verify ==="
+          grep -n "fallback CPU" ggml/src/ggml-metal/ggml-metal-context.m
 
-      - name: Configure CMake
+      - name: Configure CMake (Metal, force iOS 16.4, NBUFFERS=32)
         run: |
-          cd "$LLAMA_DIR"
-          cmake -S . -B build-ios -G Ninja \
+          cmake -B "$LLAMA_DIR/build-ios" \
+            -S "$LLAMA_DIR" \
             -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_SYSROOT="${{ env.SDK_DIR }}" \
             -DCMAKE_OSX_ARCHITECTURES=arm64 \
-            -DCMAKE_OSX_DEPLOYMENT_TARGET=$DEPLOYMENT_TARGET \
-            -DCMAKE_C_COMPILER="$(xcrun -sdk iphoneos -find clang)" \
-            -DCMAKE_CXX_COMPILER="$(xcrun -sdk iphoneos -find clang++)" \
-            -DCMAKE_SYSROOT="/usr/local/share/iPhoneOS.sdk" \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=${{ env.DEPLOYMENT_TARGET }} \
+            -DCMAKE_C_FLAGS="-target arm64-apple-ios${{ env.DEPLOYMENT_TARGET }}" \
+            -DCMAKE_CXX_FLAGS="-target arm64-apple-ios${{ env.DEPLOYMENT_TARGET }}" \
             -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX="$PWD/build-ios/install" \
-            -DLLAMA_BUILD=ON \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DCMAKE_CODE_SIGN_IDENTITY="" \
+            -DCMAKE_MACOSX_BUNDLE=OFF \
+            -DLLAMA_STATIC=ON \
+            -DGGML_STATIC=ON \
+            -DLLAMA_NATIVE=OFF \
             -DGGML_NATIVE=OFF \
             -DLLAMA_BUILD_COMMON=ON \
             -DLLAMA_BUILD_TOOLS=ON \
@@ -153,12 +155,14 @@ jobs:
           </dict>
           </plist>
           EOF
-          ldid -Smetal-ent.xml "$LLAMA_DIR/build-ios/bin/llama-cli" || echo "ldid cli failed"
-          ldid -Smetal-ent.xml "$LLAMA_DIR/build-ios/bin/llama-server" || echo "ldid server failed"
+          ldid -Smetal-ent.xml "$LLAMA_DIR/build-ios/bin/llama-cli"
+          ldid -Smetal-ent.xml "$LLAMA_DIR/build-ios/bin/llama-server"
 
       - name: Verify minos version
         run: |
+          echo "=== llama-cli minos ==="
           otool -l "$LLAMA_DIR/build-ios/bin/llama-cli" | grep -A3 LC_BUILD_VERSION
+          echo "=== llama-server minos ==="
           otool -l "$LLAMA_DIR/build-ios/bin/llama-server" | grep -A3 LC_BUILD_VERSION
 
       - name: Collect artifacts
