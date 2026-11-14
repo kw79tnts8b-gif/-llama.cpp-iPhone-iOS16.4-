@@ -1,61 +1,103 @@
-name: Build default.metallib (iOS18.5 SDK, deploy 16.4)
+name: Build llama.cpp for iOS (jailbroken, arm64)
 
 on:
   workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  SDK_URL: https://github.com/xybp888/iOS-SDKs/releases/download/iOS18.5-SDKs/iPhoneOS18.5.sdk.zip
+  LLAMA_URL: https://github.com/ggml-org/llama.cpp/archive/refs/tags/v0.9.0.zip
+  DEPLOYMENT_TARGET: "16.4"
 
 jobs:
-  build-metallib:
+  build:
     runs-on: macos-15
 
-    env:
-      LLAMA_TAG: v0.9.0
-
     steps:
-      - name: Checkout llama.cpp v0.9.0
-        run: |
-          git clone --depth 1 --branch ${{ env.LLAMA_TAG }} https://github.com/ggml-org/llama.cpp.git
-          cd llama.cpp
-          git submodule update --init --recursive
+      - name: Checkout (minimal, no git history needed)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
-      - name: Download iPhoneOS18.5.sdk
+      - name: Download & extract iPhoneOS SDK
         run: |
-          curl -L -o iPhoneOS18.5.sdk.zip \
-            https://github.com/xybp888/iOS-SDKs/releases/download/iOS18.5-SDKs/iPhoneOS18.5.sdk.zip
-          mkdir -p $HOME/sdks
-          unzip -q iPhoneOS18.5.sdk.zip -d $HOME/sdks
-          SDK=$(find $HOME/sdks -name "iPhoneOS*.sdk" -type d | head -n 1)
-          echo "SDK=$SDK" >> $GITHUB_ENV
-          echo "Found SDK: $SDK"
+          curl -L "$SDK_URL" -o iPhoneOS18.5.sdk.zip
+          unzip -q iPhoneOS18.5.sdk.zip
+          # 解压后目录名可能是 iPhoneOS18.5.sdk 或嵌套一层，统一归一化
+          if [ -d "iPhoneOS18.5.sdk" ]; then
+            SDK_DIR="$(pwd)/iPhoneOS18.5.sdk"
+          elif [ -d "iPhoneOS18.5.sdk/iPhoneOS18.5.sdk" ]; then
+            SDK_DIR="$(pwd)/iPhoneOS18.5.sdk/iPhoneOS18.5.sdk"
+          else
+            # 找第一个 .sdk 目录
+            SDK_DIR="$(find . -maxdepth 2 -name '*.sdk' -type d | head -1)"
+          fi
+          echo "SDK_DIR=$SDK_DIR" >> $GITHUB_ENV
+          echo "SDK path: $SDK_DIR"
+
+      - name: Download & extract llama.cpp v0.9.0
+        run: |
+          curl -L "$LLAMA_URL" -o llama.cpp.zip
+          unzip -q llama.cpp.zip
+          mv llama.cpp-0.9.0 llama.cpp
+          echo "LLAMA_DIR=$(pwd)/llama.cpp" >> $GITHUB_ENV
 
       - name: Configure CMake
         run: |
-          cd llama.cpp
-          cmake -B build-ios \
+          cmake -B "$LLAMA_DIR/build-ios" \
+            -S "$LLAMA_DIR" \
             -DCMAKE_SYSTEM_NAME=iOS \
-            -DCMAKE_OSX_SYSROOT="$SDK" \
+            -DCMAKE_OSX_SYSROOT="${{ env.SDK_DIR }}" \
             -DCMAKE_OSX_ARCHITECTURES=arm64 \
-            -DCMAKE_OSX_DEPLOYMENT_TARGET=16.4 \
+            -DIPHONEOS_DEPLOYMENT_TARGET=${{ env.DEPLOYMENT_TARGET }} \
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_SHARED_LIBS=OFF \
-            -DGGML_METAL=ON \
-            -DGGML_METAL_EMBED_LIBRARY=OFF \
+            -DCMAKE_CODE_SIGN_IDENTITY="" \
+            -DLLAMA_STATIC=ON \
+            -DGGML_STATIC=ON \
+            -DLLAMA_NATIVE=OFF \
+            -DGGML_NATIVE=OFF \
+            -DLLAMA_BUILD_COMMON=ON \
+            -DLLAMA_BUILD_TOOLS=ON \
+            -DLLAMA_BUILD_SERVER=ON \
             -DLLAMA_BUILD_TESTS=OFF \
-            -DLLAMA_BUILD_TOOLS=OFF \
             -DLLAMA_BUILD_EXAMPLES=OFF \
-            -DLLAMA_BUILD_APP=OFF
+            -DLLAMA_BUILD_APP=OFF \
+            -DLLAMA_BUILD_UI=OFF \
+            -DLLAMA_BUILD_MTMD=OFF \
+            -DLLAMA_OPENSSL=OFF \
+            -DLLAMA_ALL_WARNINGS=OFF \
+            -DGGML_CPU=ON \
+            -DGGML_CPU_REPACK=ON \
+            -DGGML_CPU_KLEIDIAI=ON \
+            -DGGML_METAL=OFF \
+            -DGGML_ACCELERATE=OFF \
+            -DGGML_BLAS=OFF \
+            -DGGML_BACKEND_DL=OFF
 
-      - name: Build metallib only
+      - name: Build
         run: |
-          cd llama.cpp
-          cmake --build build-ios --target ggml-metal-lib -j$(sysctl -n hw.ncpu)
+          cmake --build "$LLAMA_DIR/build-ios" --config Release --parallel $(sysctl -n hw.ncpu)
 
-      - name: Find and upload default.metallib
+      - name: Collect artifacts
         run: |
-          cd llama.cpp
-          find build-ios -name 'default.metallib'
+          mkdir -p dist
+          cp "$LLAMA_DIR/build-ios/bin/llama-cli" dist/ || true
+          cp "$LLAMA_DIR/build-ios/bin/llama-server" dist/ || true
+          # 如果 bin 下没有，尝试从 tools 子目录找
+          if [ ! -f "dist/llama-cli" ]; then
+            find "$LLAMA_DIR/build-ios" -name "llama-cli" -exec cp {} dist/ \;
+          fi
+          if [ ! -f "dist/llama-server" ]; then
+            find "$LLAMA_DIR/build-ios" -name "llama-server" -exec cp {} dist/ \;
+          fi
+          chmod +x dist/llama-cli dist/llama-server
+          ls -lh dist/
 
-      - name: Upload artifact
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: default.metallib
-          path: llama.cpp/build-ios/**/default.metallib
+          name: llama-cli-server-ios-arm64
+          path: dist/
