@@ -15,8 +15,8 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/ios-sdk"
           curl -L https://github.com/xybp888/iOS-SDKs/releases/download/iOS17.5-SDKs/iPhoneOS17.5.sdk.zip -o /tmp/sdk.zip
-          unzip -q /tmp/sdk.zip -d "$RUNNER_TEMP/ios-sdk/"
-          echo "SDK path: $(find "$RUNNER_TEMP/ios-sdk" -name iPhoneOS*.sdk -type d | head -1)"
+          unzip -q /tmp/sdk.zip -x "__MACOSX/*" -d "$RUNNER_TEMP/ios-sdk/"
+          echo "SDK path: $(find "$RUNNER_TEMP/ios-sdk" -name iPhoneOS*.sdk -not -path '*/__MACOSX/*' -type d | head -1)"
 
       - name: Download llama.cpp v1.0.0
         run: |
@@ -26,7 +26,7 @@ jobs:
 
       - name: Configure CMake
         run: |
-          SDK=$(find "$RUNNER_TEMP/ios-sdk" -name iPhoneOS*.sdk -type d | head -1)
+          SDK=$(find "$RUNNER_TEMP/ios-sdk" -name iPhoneOS*.sdk -not -path '*/__MACOSX/*' -type d | head -1)
           echo "Using SDK: $SDK"
           cmake -S /tmp/llama.cpp -B /tmp/llama-build \
             -DCMAKE_SYSTEM_NAME=iOS \
