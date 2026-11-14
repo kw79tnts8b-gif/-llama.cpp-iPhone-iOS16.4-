@@ -38,7 +38,7 @@ jobs:
           mv llama.cpp-0.9.0 llama.cpp
           echo "LLAMA_DIR=$(pwd)/llama.cpp" >> $GITHUB_ENV
 
-      - name: Configure CMake (Metal enabled, iOS 16.4 deployment)
+      - name: Configure CMake (Metal enabled, force iOS 16.4 target triple)
         run: |
           cmake -B "$LLAMA_DIR/build-ios" \
             -S "$LLAMA_DIR" \
@@ -46,7 +46,8 @@ jobs:
             -DCMAKE_OSX_SYSROOT="${{ env.SDK_DIR }}" \
             -DCMAKE_OSX_ARCHITECTURES=arm64 \
             -DCMAKE_OSX_DEPLOYMENT_TARGET=${{ env.DEPLOYMENT_TARGET }} \
-            -DIPHONEOS_DEPLOYMENT_TARGET=${{ env.DEPLOYMENT_TARGET }} \
+            -DCMAKE_C_FLAGS="-target arm64-apple-ios${{ env.DEPLOYMENT_TARGET }}" \
+            -DCMAKE_CXX_FLAGS="-target arm64-apple-ios${{ env.DEPLOYMENT_TARGET }}" \
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_SHARED_LIBS=OFF \
             -DCMAKE_CODE_SIGN_IDENTITY="" \
@@ -74,6 +75,11 @@ jobs:
             -DGGML_BLAS=OFF \
             -DGGML_BACKEND_DL=OFF
 
+      - name: Verify deployment target
+        run: |
+          otool -l "$LLAMA_DIR/build-ios/bin/llama-cli" 2>/dev/null | grep -A3 LC_BUILD_VERSION || true
+          otool -l "$LLAMA_DIR/build-ios/bin/llama-server" 2>/dev/null | grep -A3 LC_BUILD_VERSION || true
+
       - name: Build
         run: |
           cmake --build "$LLAMA_DIR/build-ios" --config Release --parallel $(sysctl -n hw.ncpu)
@@ -82,6 +88,13 @@ jobs:
         run: |
           find "$LLAMA_DIR/build-ios" -name "llama-cli" -exec codesign --force --sign - {} \;
           find "$LLAMA_DIR/build-ios" -name "llama-server" -exec codesign --force --sign - {} \;
+
+      - name: Verify minos version
+        run: |
+          echo "=== llama-cli minos ==="
+          otool -l "$LLAMA_DIR/build-ios/bin/llama-cli" | grep -A3 LC_BUILD_VERSION
+          echo "=== llama-server minos ==="
+          otool -l "$LLAMA_DIR/build-ios/bin/llama-server" | grep -A3 LC_BUILD_VERSION
 
       - name: Collect artifacts
         run: |
