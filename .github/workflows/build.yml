@@ -1,4 +1,4 @@
-name: Build llama.cpp for iOS
+name: ios-llama-static
 
 on:
   workflow_dispatch:
@@ -6,83 +6,81 @@ on:
 jobs:
   build:
     runs-on: macos-15
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Checkout（仅拿 workflow 上下文，不拉 llama 源码）
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
-      - name: Download iOS SDK
-        run: |
-          mkdir -p "$RUNNER_TEMP/ios-sdk"
-          curl -L https://github.com/xybp888/iOS-SDKs/releases/download/iOS17.5-SDKs/iPhoneOS17.5.sdk.zip -o /tmp/sdk.zip
-          unzip -q /tmp/sdk.zip -x "__MACOSX/*" -d "$RUNNER_TEMP/ios-sdk/"
-          echo "SDK path: $(find "$RUNNER_TEMP/ios-sdk" -name iPhoneOS*.sdk -not -path '*/__MACOSX/*' -type d | head -1)"
+      - name: Install cmake + ninja
+        uses: lukka/get-cmake@latest
 
-      - name: Download llama.cpp v1.0.0
+      - name: Download SDK + llama.cpp v1.0.0
         run: |
-          curl -L https://github.com/ggml-org/llama.cpp/archive/refs/tags/v1.0.0.zip -o /tmp/llama.zip
-          unzip -q /tmp/llama.zip -d /tmp/
-          mv /tmp/llama.cpp-1.0.0 /tmp/llama.cpp
+          mkdir -p $HOME/ios-sdk $HOME/src
+          curl -L -o $HOME/ios-sdk/sdk.zip "https://github.com/xybp888/iOS-SDKs/releases/download/iOS17.5-SDKs/iPhoneOS17.5.sdk.zip"
+          curl -L -o $HOME/src/llama.zip "https://github.com/ggml-org/llama.cpp/archive/refs/tags/v1.0.0.zip"
 
-      - name: Patch llama.cpp (remove MACOSX_BUNDLE)
+      - name: Unzip
         run: |
-          # Remove tests entirely to avoid MACOSX_BUNDLE errors
-          rm -rf /tmp/llama.cpp/tests
-          # Patch tools/server/CMakeLists.txt to remove MACOSX_BUNDLE
-          sed -i '' 's/MACOSX_BUNDLE//g' /tmp/llama.cpp/tools/server/CMakeLists.txt
-          # Patch any other MACOSX_BUNDLE in tools
-          find /tmp/llama.cpp/tools -name CMakeLists.txt -exec sed -i '' 's/MACOSX_BUNDLE//g' {} \;
+          cd $HOME/ios-sdk && unzip -o sdk.zip
+          cd $HOME/src && unzip -o llama.zip
+          # 解压后目录：llama.cpp-1.0.0
 
-      - name: Configure CMake
+      - name: Locate SDK path
+        id: sdk
         run: |
-          SDK=$(find "$RUNNER_TEMP/ios-sdk" -name iPhoneOS*.sdk -not -path '*/__MACOSX/*' -type d | head -1)
-          echo "Using SDK: $SDK"
-          cmake -S /tmp/llama.cpp -B /tmp/llama-build \
+          SDK_DIR=$(find $HOME/ios-sdk -maxdepth 2 -type d -name "iPhoneOS17.5.sdk" | head -n1)
+          echo "SDK=$SDK_DIR" >> "$GITHUB_OUTPUT"
+          echo "Found SDK: $SDK_DIR"
+
+      - name: CMake configure（iOS arm64, static, no metal, no sign）
+        run: |
+          SDK="${{ steps.sdk.outputs.SDK }}"
+          SRC="$HOME/src/llama.cpp-1.0.0"
+
+          cmake -B $HOME/build -G Ninja \
             -DCMAKE_SYSTEM_NAME=iOS \
-            -DCMAKE_SYSTEM_VERSION=16.4 \
             -DCMAKE_OSX_SYSROOT="$SDK" \
             -DCMAKE_OSX_ARCHITECTURES=arm64 \
-            -DCMAKE_C_COMPILER=$(xcrun -find clang) \
-            -DCMAKE_CXX_COMPILER=$(xcrun -find clang++) \
-            -DCMAKE_C_COMPILER_TARGET=arm64-apple-ios16.4 \
-            -DCMAKE_CXX_COMPILER_TARGET=arm64-apple-ios16.4 \
             -DCMAKE_OSX_DEPLOYMENT_TARGET=16.4 \
-            -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=BOTH \
-            -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=BOTH \
+            -DCMAKE_BUILD_TYPE=Release \
             -DGGML_METAL=OFF \
-            -DGGML_BLAS=OFF \
-            -DGGML_OPENMP=OFF \
+            -DGGML_BLAS=ON \
             -DBUILD_SHARED_LIBS=OFF \
-            -DLLAMA_BUILD_TOOLS=ON \
             -DLLAMA_BUILD_SERVER=ON \
-            -DLLAMA_BUILD_EXAMPLES=OFF \
             -DLLAMA_BUILD_TESTS=OFF \
-            -DLLAMA_OPENSSL=OFF \
-            -DLLAMA_SUBPROCESS=OFF
+            -DLLAMA_BUILD_EXAMPLES=OFF \
+            -DLLAMA_CURL=OFF \
+            -DLLAMA_BUILD_IS_DEV=OFF \
+            -DCMAKE_C_FLAGS="-target arm64-apple-ios16.4 -isysroot $SDK" \
+            -DCMAKE_CXX_FLAGS="-target arm64-apple-ios16.4 -isysroot $SDK" \
+            -DCMAKE_EXE_LINKER_FLAGS="-target arm64-apple-ios16.4 -isysroot $SDK -Wl,-no_adhoc_codesign" \
+            -S "$SRC"
 
-      - name: Build
-        run: cmake --build /tmp/llama-build --config Release -j$(sysctl -n hw.ncpu)
-
-      - name: Strip signature and symbols
+      - name: Build llama-cli + llama-server
         run: |
-          for f in /tmp/llama-build/bin/llama-cli /tmp/llama-build/bin/llama-server; do
-            echo "Processing $f"
-            codesign --remove-signature "$f" 2>/dev/null || true
-            strip -x "$f"
+          cmake --build $HOME/build --target llama-cli llama-server -j$(sysctl -n hw.logicalcpu)
+
+      - name: Strip codesign completely（裸二进制）
+        run: |
+          for bin in llama-cli llama-server; do
+            BIN="$HOME/build/bin/$bin"
+            if [ -f "$BIN" ]; then
+              codesign --remove-signature "$BIN" || true
+            fi
           done
 
-      - name: Verify no signature
+      - name: Inspect binaries（调试用，后面可删）
         run: |
-          for f in /tmp/llama-build/bin/llama-cli /tmp/llama-build/bin/llama-server; do
-            echo "=== $f ==="
-            file "$f"
-            otool -l "$f" | grep -c LC_CODE_SIGNATURE || echo "0 signature segments (good)"
-          done
+          file $HOME/build/bin/llama-cli
+          file $HOME/build/bin/llama-server
+          otool -l $HOME/build/bin/llama-cli | grep -A3 LC_CODE_SIGNATURE || echo "no code signature"
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
-          name: llama-ios-arm64
+          name: llama-ios-arm64-nosign
           path: |
-            /tmp/llama-build/bin/llama-cli
-            /tmp/llama-build/bin/llama-server
+            $HOME/build/bin/llama-cli
+            $HOME/build/bin/llama-server
