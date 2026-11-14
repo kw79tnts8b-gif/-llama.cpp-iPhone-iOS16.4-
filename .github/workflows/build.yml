@@ -1,63 +1,61 @@
-name: Build llama.cpp for iOS (jailbroken, arm64, Metal, iOS 16.4)
+name: build llama.cpp iOS Metal arm64 (iOS16.4 patched v0.8.0)
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ main, master ]
-
-env:
-  SDK_URL: https://github.com/xybp888/iOS-SDKs/releases/download/iOS18.5-SDKs/iPhoneOS18.5.sdk.zip
-  LLAMA_URL: https://github.com/ggml-org/llama.cpp/archive/refs/tags/v0.8.0.zip
-  DEPLOYMENT_TARGET: "16.4"
 
 jobs:
   build:
-    runs-on: macos-15
+    runs-on: macos-14
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-
-      - name: Download iOS SDK
-        run: |
-          curl -L -o iPhoneOS.sdk.zip "$SDK_URL"
-          unzip -q iPhoneOS.sdk.zip
-          echo "SDK_PATH=$(pwd)/iPhoneOS.sdk" >> $GITHUB_ENV
 
       - name: Download llama.cpp v0.8.0
         run: |
-          curl -L -o llama.cpp.zip "$LLAMA_URL"
-          unzip -q llama.cpp.zip
-          mv llama.cpp-0.8.0 llama.cpp
-          echo "LLAMA_DIR=$(pwd)/llama.cpp" >> $GITHUB_ENV
+          LLAMA_DIR="$GITHUB_WORKSPACE/_llama.cpp-iPhone"
+          rm -rf "$LLAMA_DIR"
+          curl -L \
+            https://github.com/ggerganov/llama.cpp/archive/refs/tags/v0.8.0.tar.gz \
+            -o llama.tar.gz
+          tar -xzf llama.tar.gz
+          mv llama.cpp-0.8.0 "$LLAMA_DIR"
+          echo "LLAMA_DIR=$LLAMA_DIR" >> $GITHUB_ENV
+          ls -l "$LLAMA_DIR"
 
       - name: Patch Metal asserts (ALL 4 + fallback)
         run: |
           cd "$LLAMA_DIR"
           MF="ggml/src/ggml-metal/ggml-metal-context.m"
           ls -l "$MF" || { echo "File not found"; exit 1; }
-          # 1) ASSERT 形式
+
+          # ASSERT form
           sed -i '' 's/GGML_ASSERT(buf_dst);/if (bid_dst.metal == nil) { GGML_LOG_DEBUG("Metal: dst buf fail, fallback CPU\n"); return false; }/' "$MF"
           sed -i '' 's/GGML_ASSERT(buf_src);/if (bid_src.metal == nil) { GGML_LOG_DEBUG("Metal: src buf fail, fallback CPU\n"); return false; }/' "$MF"
-          # 2) ABORT 形式（341/391 处）
+
+          # ABORT form (around 341/391)
           sed -i '' '/if (bid_dst.metal == nil)/,+2 s/GGML_ABORT("[^"]*");/GGML_LOG_DEBUG("Metal: dst bid fail, fallback CPU\n"); return false;/' "$MF"
           sed -i '' '/if (bid_src.metal == nil)/,+2 s/GGML_ABORT("[^"]*");/GGML_LOG_DEBUG("Metal: src bid fail, fallback CPU\n"); return false;/' "$MF"
-          echo "=== verify ==="
-          grep -n "fallback CPU" "$MF" || echo "PATCH FAILED"
 
-      - name: Configure CMake (Metal, force iOS 16.4, no KleidiAI)
+          echo "=== verify ==="
+          grep -n "fallback CPU" "$MF" || { echo "PATCH FAILED"; exit 1; }
+
+      - name: Configure CMake (Metal, force iOS 16.4)
         run: |
           cmake -S "$LLAMA_DIR" -B "$LLAMA_DIR/build-ios" \
             -G Ninja \
-            -DCMAKE_SYSTEM_NAME=iOS \
-            -DCMAKE_OSX_SYSROOT="$SDK_PATH" \
-            -DCMAKE_OSX_ARCHITECTURES=arm64 \
-            -DCMAKE_OSX_DEPLOYMENT_TARGET="$DEPLOYMENT_TARGET" \
-            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_TOOLCHAIN_FILE="$LLAMA_DIR/cmake/ios.toolchain.cmake" \
+            -DPLATFORM=OS64 \
+            -DDEPLOYMENT_TARGET=16.4 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=16.4 \
+            -DCMAKE_INSTALL_PREFIX="$LLAMA_DIR/build-ios/install" \
+            -DCMAKE_OSX_BUNDLE_DESTINATION=. \
+            -DCMAKE_OSX_BUNDLE_DESTINATION_ARCHIVE=. \
+            -DLLAMA_BUILD=ON \
             -DLLAMA_BUILD_TESTS=OFF \
             -DLLAMA_BUILD_EXAMPLES=ON \
-            -DLLAMA_BUILD_SERVER=ON \
+            -DLLAMA_BUILD_SERVER=OFF \
+            -DLLAMA_BUILD_TOOLS=OFF \
             -DLLAMA_CURL=OFF \
             -DLLAMA_OPENSSL=OFF \
             -DLLAMA_ALL_WARNINGS=OFF \
@@ -74,11 +72,15 @@ jobs:
 
       - name: Build
         run: |
-          cmake --build "$LLAMA_DIR/build-ios" --config Release --parallel $(sysctl -n hw.ncpu) 2>&1 | tail -150
+          cmake --build "$LLAMA_DIR/build-ios" \
+            --config Release \
+            --parallel $(sysctl -n hw.ncpu) 2>&1 | tail -150
 
       - name: Ad-hoc codesign
         run: |
-          find "$LLAMA_DIR/build-ios" -type f \( -name "llama-cli" -o -name "main" -o -name "llama-server" \) -exec codesign --force --sign - {} \; || true
+          find "$LLAMA_DIR/build-ios" -type f \
+            \( -name "llama-cli" -o -name "main" \) \
+            -exec codesign --force --sign - {} \; || true
 
       - name: ldid sign with Metal entitlements
         run: |
@@ -108,28 +110,32 @@ jobs:
           </dict>
           </plist>
           EOF
-          find "$LLAMA_DIR/build-ios" -type f \( -name "llama-cli" -o -name "main" -o -name "llama-server" \) -exec ldid -Smetal-ent.xml {} \; || true
+          find "$LLAMA_DIR/build-ios" -type f \
+            \( -name "llama-cli" -o -name "main" \) \
+            -exec ldid -Smetal-ent.xml {} \; || true
 
       - name: Verify minos version
         run: |
-          CLI=$(find "$LLAMA_DIR/build-ios" -type f \( -name "llama-cli" -o -name "main" \) -perm -u+x | head -n 1)
-          SRV=$(find "$LLAMA_DIR/build-ios" -type f -name "llama-server" -perm -u+x | head -n 1)
-          echo "=== CLI minos ==="; [ -n "$CLI" ] && otool -l "$CLI" | grep -A3 LC_BUILD_VERSION || true
-          echo "=== SRV minos ==="; [ -n "$SRV" ] && otool -l "$SRV" | grep -A3 LC_BUILD_VERSION || true
+          CLI=$(find "$LLAMA_DIR/build-ios" -type f \
+            \( -name "llama-cli" -o -name "main" \) -perm -u+x | head -n 1)
+          echo "=== CLI minos ==="
+          [ -n "$CLI" ] && otool -l "$CLI" | grep -A3 LC_BUILD_VERSION || true
 
       - name: Collect artifacts
         run: |
           mkdir -p dist
-          CLI=$(find "$LLAMA_DIR/build-ios" -type f \( -name "llama-cli" -o -name "main" \) -perm -u+x | head -n 1)
-          SRV=$(find "$LLAMA_DIR/build-ios" -type f -name "llama-server" -perm -u+x | head -n 1)
-          if [ -z "$CLI" ]; then echo "ERROR: llama-cli/main not found"; exit 1; fi
+          CLI=$(find "$LLAMA_DIR/build-ios" -type f \
+            \( -name "llama-cli" -o -name "main" \) -perm -u+x | head -n 1)
+          if [ -z "$CLI" ]; then
+            echo "ERROR: llama-cli/main not found"
+            exit 1
+          fi
           cp "$CLI" dist/llama-cli-metal
-          if [ -n "$SRV" ]; then cp "$SRV" dist/llama-server-metal; fi
-          chmod +x dist/*
+          chmod +x dist/llama-cli-metal
           ls -lh dist/
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: llama-cli-server-ios-arm64-metal-ios16.4-v0.8.0-patched
+          name: llama-cli-ios-arm64-metal-ios16.4-v0.8.0-patched
           path: dist/
