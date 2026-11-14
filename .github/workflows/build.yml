@@ -44,8 +44,10 @@ jobs:
             -DGGML_BLAS=OFF \
             -DGGML_OPENMP=OFF \
             -DBUILD_SHARED_LIBS=OFF \
+            -DBUILD_TESTING=OFF \
             -DLLAMA_BUILD_TOOLS=ON \
             -DLLAMA_BUILD_SERVER=ON \
+            -DLLAMA_BUILD_EXAMPLES=OFF \
             -DLLAMA_OPENSSL=OFF \
             -DLLAMA_SUBPROCESS=OFF
 
