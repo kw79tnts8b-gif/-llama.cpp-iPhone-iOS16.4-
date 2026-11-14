@@ -1,83 +1,86 @@
-name: Build llama.cpp iOS arm64 (Metal)
+name: build-ios-arm64-metal
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
 
 jobs:
-  build:
+  build-ios:
     runs-on: macos-15
-
-    env:
-      SDK_URL: "https://github.com/theos/sdks/releases/download/master-146e41f/iPhoneOS16.5.sdk.tar.xz"
-      SDK_DIR: "iPhoneOS16.5.sdk"
-      DEPLOYMENT_TARGET: "16.5"
-      LLVM_VER: "17"
-
     steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
       - name: Checkout llama.cpp v0.9.0
         run: |
+          rm -rf llama.cpp
           git clone --depth 1 --branch v0.9.0 https://github.com/ggml-org/llama.cpp.git
-          cd llama.cpp
 
-      - name: Download & extract iPhoneOS16.5 SDK
-        run: |
-          curl -L "$SDK_URL" -o sdk.tar.xz
-          mkdir -p sdk
-          tar xf sdk.tar.xz -C sdk
-          mv sdk/iPhoneOS16.5.sdk "$SDK_DIR"
+      - name: Install CMake
+        run: brew install cmake
 
-      - name: Install LLVM (clang)
+      - name: Prepare iOS SDK (community iPhoneOS17.5.sdk)
         run: |
-          brew install llvm@${LLVM_VER}
-          echo "$(brew --prefix llvm@${LLVM_VER})/bin" >> $GITHUB_PATH
+          # 把你的 iPhoneOS17.5.sdk 放到仓库 ./sdk/ 下，或从这里下载社区版本
+          # 例: mkdir -p /opt/iphoneos-sdk && cp -r ./sdk/iPhoneOS17.5.sdk /opt/iphoneos-sdk/
+          echo "SDK path: $HOME/sdk/iPhoneOS17.5.sdk"
+          ls -la "$HOME/sdk/iPhoneOS17.5.sdk" || exit 1
 
       - name: Configure CMake
         run: |
-          mkdir -p llama.cpp/build && cd llama.cpp/build
-          cmake .. \
+          SDK=$HOME/sdk/iPhoneOS17.5.sdk
+          cmake -B llama.cpp/build \
+            -G Xcode \
             -DCMAKE_SYSTEM_NAME=iOS \
-            -DCMAKE_OSX_SYSROOT="$(pwd)/../../$SDK_DIR" \
             -DCMAKE_OSX_ARCHITECTURES=arm64 \
-            -DCMAKE_OSX_DEPLOYMENT_TARGET="$DEPLOYMENT_TARGET" \
-            -DCMAKE_C_COMPILER="$(brew --prefix llvm@${LLVM_VER})/bin/clang" \
-            -DCMAKE_CXX_COMPILER="$(brew --prefix llvm@${LLVM_VER})/bin/clang++" \
+            -DCMAKE_OSX_SYSROOT=$SDK \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=16.4 \
+            -DCMAKE_C_FLAGS="-miphoneos-version-min=16.4" \
+            -DCMAKE_CXX_FLAGS="-miphoneos-version-min=16.4" \
             -DGGML_METAL=ON \
             -DGGML_METAL_EMBED_LIBRARY=ON \
             -DGGML_METAL_NDEBUG=ON \
             -DGGML_CPU=ON \
-            -DGGML_CPU_REPACK=ON \
-            -DGGML_CPU_KLEIDIAI=ON \
+            -DGGML_REPACK=ON \
+            -DGGML_KLEIDIAI=ON \
             -DGGML_BLAS=OFF \
             -DGGML_ACCELERATE=OFF \
-            -DBUILD_SHARED_LIBS=OFF \
-            -DBUILD_TESTING=OFF \
+            -DLLAMA_BUILD_TOOLS=ON \
+            -DLLAMA_BUILD_SERVER=ON \
             -DLLAMA_BUILD_TESTS=OFF \
-            -DLLAMA_BUILD_EXAMPLES=OFF
+            -DLLAMA_BUILD_EXAMPLES=OFF \
+            -DLLAMA_BUILD_APP=OFF \
+            -DBUILD_SHARED_LIBS=OFF
 
       - name: Build
         run: |
-          cd llama.cpp/build
-          cmake --build . --config Release -j$(sysctl -n hw.ncpu)
+          cmake --build llama.cpp/build --config Release -j $(sysctl -n hw.logicalcpu) \
+            -- CODE_SIGNING_ALLOWED=NO DEVELOPMENT_TEAM= CODE_SIGN_IDENTITY=
 
-      - name: Strip binaries
+      - name: Collect binaries
         run: |
-          cd llama.cpp/build/bin
-          llvm-strip llama-cli llama-server
+          mkdir -p dist
+          find llama.cpp/build -name "llama-cli" -type f -exec cp {} dist/ \;
+          find llama.cpp/build -name "llama-server" -type f -exec cp {} dist/ \;
+          ls -la dist/
 
-      - name: Codesign (ad-hoc)
+      - name: Strip & ad-hoc sign
         run: |
-          cd llama.cpp/build/bin
-          codesign --force --deep --sign - llama-cli
-          codesign --force --deep --sign - llama-server
+          cd dist
+          for bin in llama-cli llama-server; do
+            if [ -f "$bin" ]; then
+              strip "$bin" 2>/dev/null || true
+              codesign --force --deep --sign - "$bin" 2>/dev/null || true
+            fi
+          done
+          ls -la
 
-      - name: Collect artifacts
-        run: |
-          mkdir -p upload
-          cp llama.cpp/build/bin/llama-cli upload/
-          cp llama.cpp/build/bin/llama-server upload/
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+      - name: Upload artifact
+        uses: actions/upload-artifact@v6
         with:
           name: llama-cli-server-ios-arm64-metal
-          path: upload/
+          path: dist/*
+          retention-days: 7
