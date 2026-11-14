@@ -1,4 +1,4 @@
-name: Build llama.cpp for iOS (jailbroken, arm64, Metal)
+name: Build llama.cpp for iOS (jailbroken, arm64, Metal, iOS 16.4)
 on:
   workflow_dispatch:
   push:
@@ -38,13 +38,14 @@ jobs:
           mv llama.cpp-0.9.0 llama.cpp
           echo "LLAMA_DIR=$(pwd)/llama.cpp" >> $GITHUB_ENV
 
-      - name: Configure CMake (Metal enabled)
+      - name: Configure CMake (Metal enabled, iOS 16.4 deployment)
         run: |
           cmake -B "$LLAMA_DIR/build-ios" \
             -S "$LLAMA_DIR" \
             -DCMAKE_SYSTEM_NAME=iOS \
             -DCMAKE_OSX_SYSROOT="${{ env.SDK_DIR }}" \
             -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=${{ env.DEPLOYMENT_TARGET }} \
             -DIPHONEOS_DEPLOYMENT_TARGET=${{ env.DEPLOYMENT_TARGET }} \
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_SHARED_LIBS=OFF \
@@ -85,19 +86,15 @@ jobs:
       - name: Collect artifacts
         run: |
           mkdir -p dist
-          cp "$LLAMA_DIR/build-ios/bin/llama-cli" dist/ || true
-          cp "$LLAMA_DIR/build-ios/bin/llama-server" dist/ || true
-          if [ ! -f "dist/llama-cli" ]; then
-            find "$LLAMA_DIR/build-ios" -name "llama-cli" -exec cp {} dist/ \;
-          fi
-          if [ ! -f "dist/llama-server" ]; then
-            find "$LLAMA_DIR/build-ios" -name "llama-server" -exec cp {} dist/ \;
-          fi
-          chmod +x dist/llama-cli dist/llama-server
+          cp "$LLAMA_DIR/build-ios/bin/llama-cli" dist/llama-cli-metal || \
+            find "$LLAMA_DIR/build-ios" -name "llama-cli" -exec cp {} dist/llama-cli-metal \;
+          cp "$LLAMA_DIR/build-ios/bin/llama-server" dist/llama-server-metal || \
+            find "$LLAMA_DIR/build-ios" -name "llama-server" -exec cp {} dist/llama-server-metal \;
+          chmod +x dist/llama-cli-metal dist/llama-server-metal
           ls -lh dist/
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: llama-cli-server-ios-arm64-metal
+          name: llama-cli-server-ios-arm64-metal-ios16.4
           path: dist/
