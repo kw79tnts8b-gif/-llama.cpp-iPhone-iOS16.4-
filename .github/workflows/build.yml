@@ -25,13 +25,11 @@ jobs:
         run: |
           curl -L "$SDK_URL" -o iPhoneOS18.5.sdk.zip
           unzip -q iPhoneOS18.5.sdk.zip
-          # 解压后目录名可能是 iPhoneOS18.5.sdk 或嵌套一层，统一归一化
           if [ -d "iPhoneOS18.5.sdk" ]; then
             SDK_DIR="$(pwd)/iPhoneOS18.5.sdk"
           elif [ -d "iPhoneOS18.5.sdk/iPhoneOS18.5.sdk" ]; then
             SDK_DIR="$(pwd)/iPhoneOS18.5.sdk/iPhoneOS18.5.sdk"
           else
-            # 找第一个 .sdk 目录
             SDK_DIR="$(find . -maxdepth 2 -name '*.sdk' -type d | head -1)"
           fi
           echo "SDK_DIR=$SDK_DIR" >> $GITHUB_ENV
@@ -55,6 +53,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_SHARED_LIBS=OFF \
             -DCMAKE_CODE_SIGN_IDENTITY="" \
+            -DCMAKE_MACOSX_BUNDLE=OFF \
             -DLLAMA_STATIC=ON \
             -DGGML_STATIC=ON \
             -DLLAMA_NATIVE=OFF \
@@ -86,7 +85,6 @@ jobs:
           mkdir -p dist
           cp "$LLAMA_DIR/build-ios/bin/llama-cli" dist/ || true
           cp "$LLAMA_DIR/build-ios/bin/llama-server" dist/ || true
-          # 如果 bin 下没有，尝试从 tools 子目录找
           if [ ! -f "dist/llama-cli" ]; then
             find "$LLAMA_DIR/build-ios" -name "llama-cli" -exec cp {} dist/ \;
           fi
